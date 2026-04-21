@@ -145,14 +145,17 @@ app/
 
 All tables include `id` (UUID v7 — sortable), `created_at`, `updated_at`. Use UUID v7 for all primary keys via `uuid_generate_v7()` extension or app-side generation.
 
+**Tenant scoping:** tenant-owned tables (recipients, suppressions, unsub_outbox, workflows, journeys, campaigns, templates, sends, events) include a `tenant text NOT NULL` column. V1 uses `'otto'` everywhere; the column exists so a second tenant (Giraffe, etc.) can be onboarded in v2 without schema churn. Unique constraints that reference `email` are keyed on `(tenant, email)` so each tenant maintains its own address space.
+
 ### 4.1 Core tables
 
 ```sql
--- Recipients = email addresses we can send to. Deduplicated by email.
+-- Recipients = email addresses we can send to. Deduplicated by (tenant, email).
 recipients (
   id              uuid PK,
-  email           citext UNIQUE NOT NULL,
-  external_id     text,             -- OTTO lead_id (latest known)
+  tenant          text NOT NULL,    -- 'otto' in v1; scoping key for multi-tenant
+  email           citext NOT NULL,
+  external_id     text,             -- tenant-side lead id (OTTO lead_id for tenant='otto')
   vertical        text NOT NULL,    -- 'auto' | 'home'
   first_seen_at   timestamptz NOT NULL,
   last_seen_at    timestamptz NOT NULL,
@@ -161,7 +164,8 @@ recipients (
   attributes      jsonb NOT NULL DEFAULT '{}',  -- See §5 for schema
   status          text NOT NULL DEFAULT 'active', -- active|suppressed|bounced_hard|complained
   created_at      timestamptz NOT NULL,
-  updated_at      timestamptz NOT NULL
+  updated_at      timestamptz NOT NULL,
+  UNIQUE (tenant, email)
 );
 CREATE INDEX ON recipients (status, vertical);
 CREATE INDEX ON recipients USING gin (attributes);
@@ -274,21 +278,24 @@ CREATE INDEX ON events (send_id);
 CREATE INDEX ON events (recipient_id, occurred_at DESC);
 CREATE INDEX ON events (event_type, occurred_at DESC);
 
--- Suppressions = local DNE list. Sources include unsubs, bounces, complaints, OTTO push.
+-- Suppressions = per-tenant DNE list. Sources include unsubs, bounces, complaints, OTTO push.
 suppressions (
   id              uuid PK,
-  email           citext UNIQUE NOT NULL,
+  tenant          text NOT NULL,
+  email           citext NOT NULL,
   reason          text NOT NULL,    -- unsubscribe|hard_bounce|complaint|manual|otto_push
   source          text NOT NULL,    -- workflow_id, 'sns', 'otto', 'admin_user'
   campaign_id     uuid,
   notes           text,
-  suppressed_at   timestamptz NOT NULL DEFAULT now()
+  suppressed_at   timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (tenant, email)
 );
-CREATE INDEX ON suppressions USING hash (email);
+CREATE INDEX ON suppressions USING hash (email);  -- narrow by tenant at app layer
 
--- Outbox for pushing unsubscribes back to OTTO.
+-- Outbox for pushing unsubscribes back to the owning tenant (OTTO for v1).
 unsub_outbox (
   id              uuid PK,
+  tenant          text NOT NULL,
   email           citext NOT NULL,
   reason          text NOT NULL,
   occurred_at     timestamptz NOT NULL,

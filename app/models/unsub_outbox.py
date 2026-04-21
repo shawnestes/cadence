@@ -12,6 +12,7 @@ class UnsubOutbox(Base, TimestampMixin):
     __tablename__ = "unsub_outbox"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    tenant: Mapped[str] = mapped_column(Text, nullable=False)
     email: Mapped[str] = mapped_column(Citext, nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
