@@ -9,6 +9,7 @@ from app.api import (
     templates,
     unsub,
     webhooks,
+    workflows,
 )
 from app.core.auth import require_api_key
 from app.core.config import get_settings
@@ -38,6 +39,11 @@ app.include_router(
 )
 app.include_router(
     templates.router,
+    prefix="/api",
+    dependencies=[Depends(require_api_key)],
+)
+app.include_router(
+    workflows.router,
     prefix="/api",
     dependencies=[Depends(require_api_key)],
 )

@@ -77,11 +77,25 @@ async def _clean_test_rows():
             )
             await s.execute(
                 text(
+                    "DELETE FROM journeys WHERE recipient_id IN "
+                    "(SELECT id FROM recipients WHERE email LIKE :pat)"
+                ),
+                {"pat": "%@cadencetests.io"},
+            )
+            await s.execute(
+                text(
+                    "DELETE FROM journeys WHERE workflow_id IN "
+                    "(SELECT id FROM workflows WHERE name LIKE 'test-%')"
+                )
+            )
+            await s.execute(
+                text(
                     "DELETE FROM templates WHERE campaign_id IN "
                     "(SELECT id FROM campaigns WHERE name LIKE 'test-%')"
                 )
             )
             await s.execute(text("DELETE FROM campaigns WHERE name LIKE 'test-%'"))
+            await s.execute(text("DELETE FROM workflows WHERE name LIKE 'test-%'"))
             await s.execute(
                 text("DELETE FROM unsub_outbox WHERE email LIKE :pat"),
                 {"pat": "%@cadencetests.io"},

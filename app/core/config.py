@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     send_rate_limit_per_second: int = 14
     send_daily_quota: int = 50000
 
+    # Workflow engine
+    workflow_tick_interval_seconds: int = 10
+
 
 @lru_cache
 def get_settings() -> Settings:

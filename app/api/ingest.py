@@ -1,15 +1,22 @@
 from datetime import datetime, timezone
 
+import structlog
 from fastapi import APIRouter, Depends, Response, status
-from sqlalchemy import literal_column
+from sqlalchemy import literal_column, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
+from app.domain.segment import matches as segment_matches
+from app.models.journey import Journey
 from app.models.recipient import Recipient
+from app.models.workflow import Workflow
 from app.schemas.recipient import RecipientIngestIn, RecipientIngestOut
 
 router = APIRouter(tags=["ingest"])
+
+log = structlog.get_logger(__name__)
 
 
 @router.post("/ingest/recipients", response_model=RecipientIngestOut)
@@ -60,6 +67,59 @@ async def ingest_recipient(
     result = await db.execute(stmt)
     row = result.one()
     await db.commit()
+
+    recipient_id = row.id
+    tenant = payload.tenant
+    vertical = payload.vertical
+    attrs = payload.attributes or {}
+
+    try:
+        active_workflows = (
+            await db.execute(
+                select(Workflow)
+                .where(Workflow.tenant == tenant)
+                .where(Workflow.status == "active")
+            )
+        ).scalars().all()
+    except Exception as exc:
+        await db.rollback()
+        log.warning(
+            "ingest.workflow_lookup_failed",
+            recipient_id=str(recipient_id),
+            error=str(exc),
+        )
+        active_workflows = []
+
+    for wf in active_workflows:
+        if not segment_matches(wf.entry_segment, attrs, vertical):
+            continue
+        try:
+            definition = wf.definition or {}
+            entry_node_id = definition.get("entry")
+            if not entry_node_id:
+                continue
+            journey = Journey(
+                tenant=tenant,
+                workflow_id=wf.id,
+                workflow_version=wf.version,
+                recipient_id=recipient_id,
+                current_node_id=entry_node_id,
+                next_action_at=now,
+                status="active",
+                entered_at=now,
+            )
+            db.add(journey)
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+        except Exception as exc:
+            await db.rollback()
+            log.warning(
+                "ingest.journey_injection_failed",
+                workflow_id=str(wf.id),
+                recipient_id=str(recipient_id),
+                error=str(exc),
+            )
 
     response.status_code = (
         status.HTTP_201_CREATED if row.created else status.HTTP_200_OK
