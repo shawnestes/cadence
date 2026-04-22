@@ -1,4 +1,4 @@
-import { Ban, GitBranch, LayoutDashboard, Users } from "lucide-react";
+import { Ban, GitBranch, LayoutDashboard, Megaphone, Users } from "lucide-react";
 import { NavLink } from "react-router-dom";
 
 import { cn } from "@/lib/utils";
@@ -7,6 +7,7 @@ const items = [
   { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { to: "/recipients", label: "Recipients", icon: Users },
   { to: "/suppressions", label: "Suppressions", icon: Ban },
+  { to: "/campaigns", label: "Campaigns", icon: Megaphone },
   { to: "/workflows", label: "Workflows", icon: GitBranch },
 ];
 

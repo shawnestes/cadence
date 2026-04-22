@@ -5,6 +5,8 @@ from app.api import (
     health,
     ingest,
     metrics,
+    recipients,
+    stats,
     suppressions,
     templates,
     unsub,
@@ -44,6 +46,15 @@ app.include_router(
 )
 app.include_router(
     workflows.router,
+    prefix="/api",
+    dependencies=[Depends(require_api_key)],
+)
+app.include_router(
+    stats.router,
+    prefix="/api",
+)
+app.include_router(
+    recipients.router,
     prefix="/api",
     dependencies=[Depends(require_api_key)],
 )
