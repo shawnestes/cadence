@@ -1,3 +1,4 @@
+from app.models.alert import Alert
 from app.models.base import Base, Citext, TimestampMixin, uuid7
 from app.models.campaign import Campaign
 from app.models.event import Event
@@ -10,6 +11,7 @@ from app.models.unsub_outbox import UnsubOutbox
 from app.models.workflow import Workflow
 
 __all__ = [
+    "Alert",
     "Base",
     "Campaign",
     "Citext",

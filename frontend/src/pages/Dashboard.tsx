@@ -2,8 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, Wifi, WifiOff } from "lucide-react";
 
+import { listAlerts } from "@/api/alerts";
 import { getCampaignsVolume, getSesReputation, getTimeseries, getTopline, streamTopline } from "@/api/stats";
 import type {
+  AlertOut,
+  AlertsListOut,
   CampaignVolumeRow,
   CampaignsVolumeOut,
   SESReputationOut,
@@ -133,6 +136,127 @@ function ComplaintAlertBanner({ rate }: { rate: number }) {
           {pct(rate)} — exceeds 0.1% SES action threshold
         </span>
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Active alerts banner
+// ---------------------------------------------------------------------------
+
+function ActiveAlertsBanner({ alerts }: { alerts: AlertOut[] }) {
+  if (alerts.length === 0) return null;
+  return (
+    <div className="space-y-1">
+      {alerts.map((a) => {
+        const isCritical = a.severity === "critical";
+        return (
+          <div
+            key={a.id}
+            className={[
+              "border px-4 py-3 flex items-start gap-3",
+              isCritical
+                ? "bg-danger/15 border-danger"
+                : "bg-primary/10 border-primary",
+            ].join(" ")}
+          >
+            <div className="flex-1 min-w-0">
+              <span
+                className={[
+                  "text-sm font-mono font-medium uppercase tracking-[0.1em]",
+                  isCritical ? "text-danger" : "text-primary",
+                ].join(" ")}
+              >
+                {a.severity.toUpperCase()} — {a.metric.replace(/_/g, " ")}
+              </span>
+              <span
+                className={[
+                  "text-sm ml-2",
+                  isCritical ? "text-danger" : "text-primary",
+                ].join(" ")}
+              >
+                {(a.value * 100).toFixed(3)}% vs threshold {(a.threshold * 100).toFixed(3)}%
+              </span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Recent alerts table
+// ---------------------------------------------------------------------------
+
+function RecentAlertsTable({ alerts }: { alerts: AlertOut[] }) {
+  if (alerts.length === 0) {
+    return (
+      <div className="flex items-center justify-center py-6">
+        <span className="text-[0.65rem] font-mono uppercase tracking-[0.15em] text-muted-foreground">
+          No alerts in window
+        </span>
+      </div>
+    );
+  }
+
+  function statusColor(status: string): string {
+    if (status === "active") return "text-danger";
+    if (status === "pending") return "text-warn";
+    return "text-muted-foreground";
+  }
+
+  function severityColor(severity: string): string {
+    return severity === "critical" ? "text-danger" : "text-primary";
+  }
+
+  function fmtTs(iso: string): string {
+    try {
+      return new Date(iso).toLocaleString([], {
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+    } catch {
+      return iso;
+    }
+  }
+
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-xs font-mono">
+        <thead>
+          <tr className="border-b border-border">
+            <th className="pb-2 text-left text-[0.65rem] uppercase tracking-[0.15em] text-muted-foreground font-medium">Time</th>
+            <th className="pb-2 pr-3 text-left text-[0.65rem] uppercase tracking-[0.15em] text-muted-foreground font-medium">Metric</th>
+            <th className="pb-2 pr-3 text-left text-[0.65rem] uppercase tracking-[0.15em] text-muted-foreground font-medium">Severity</th>
+            <th className="pb-2 pr-3 text-left text-[0.65rem] uppercase tracking-[0.15em] text-muted-foreground font-medium">Status</th>
+            <th className="pb-2 text-right text-[0.65rem] uppercase tracking-[0.15em] text-muted-foreground font-medium tabular-nums">Value / Threshold</th>
+          </tr>
+        </thead>
+        <tbody>
+          {alerts.map((a) => (
+            <tr key={a.id} className="border-b border-border/40 last:border-0">
+              <td className="py-1.5 pr-3 tabular-nums text-muted-foreground whitespace-nowrap">
+                {fmtTs(a.created_at)}
+              </td>
+              <td className="py-1.5 pr-3 text-foreground">
+                {a.metric.replace(/_/g, " ")}
+              </td>
+              <td className={`py-1.5 pr-3 uppercase ${severityColor(a.severity)}`}>
+                {a.severity}
+              </td>
+              <td className={`py-1.5 pr-3 uppercase ${statusColor(a.status)}`}>
+                {a.status}
+              </td>
+              <td className="py-1.5 text-right tabular-nums text-foreground">
+                {(a.value * 100).toFixed(3)}% / {(a.threshold * 100).toFixed(3)}%
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -398,6 +522,21 @@ export function Dashboard() {
     retry: false,
   });
 
+  const { data: activeAlertsData } = useQuery<AlertsListOut>({
+    queryKey: ["alerts-active", TENANT],
+    queryFn: () => listAlerts({ tenant: TENANT, status: "active", limit: 20 }),
+    refetchInterval: 60_000,
+  });
+
+  const { data: recentAlertsData } = useQuery<AlertsListOut>({
+    queryKey: ["alerts-recent", TENANT],
+    queryFn: () => listAlerts({ tenant: TENANT, status: "all", limit: 10, offset: 0 }),
+    refetchInterval: 60_000,
+  });
+
+  const activeAlerts: AlertOut[] = activeAlertsData?.alerts ?? [];
+  const recentAlerts: AlertOut[] = recentAlertsData?.alerts ?? [];
+
   useEffect(() => {
     esRef.current?.close();
     setSseStatus("connecting");
@@ -452,6 +591,9 @@ export function Dashboard() {
           </div>
         </div>
       </div>
+
+      {/* Active alerts banner */}
+      <ActiveAlertsBanner alerts={activeAlerts} />
 
       {/* Complaint rate full-width alert banner */}
       {topline && topline.complaint_rate >= 0.001 && (
@@ -704,6 +846,14 @@ export function Dashboard() {
             ) : null}
           </CardContent>
         </Card>
+      </div>
+
+      {/* ---- Recent alerts ---- */}
+      <div>
+        <p className="mb-3 text-[0.7rem] font-mono font-medium text-muted-foreground uppercase tracking-[0.15em]">
+          Recent Alerts
+        </p>
+        <RecentAlertsTable alerts={recentAlerts} />
       </div>
     </div>
   );

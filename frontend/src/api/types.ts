@@ -310,6 +310,31 @@ export type TemplateListOut = {
   total: number;
 };
 
+// ------------------ Alerts ------------------
+export type AlertStatus = "pending" | "active" | "resolved" | "all";
+export type AlertSeverity = "warn" | "critical";
+
+export type AlertOut = {
+  id: string;
+  tenant: string;
+  metric: string;
+  severity: AlertSeverity;
+  threshold: number;
+  value: number;
+  status: AlertStatus;
+  pending_since: string;
+  activated_at: string | null;
+  resolved_at: string | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AlertsListOut = {
+  alerts: AlertOut[];
+  total: number;
+};
+
 // ------------------ Workflows ------------------
 export type WorkflowStatus = "draft" | "active" | "paused" | "archived";
 

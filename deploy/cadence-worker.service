@@ -1,0 +1,26 @@
+[Unit]
+Description=Cadence ESP worker (APScheduler: send, workflow tick, reputation monitor)
+After=network-online.target cadence-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cadence
+Group=cadence
+WorkingDirectory=/opt/cadence
+EnvironmentFile=/opt/cadence/.env
+ExecStart=/opt/cadence/.venv/bin/python -m app.workers.scheduler
+Restart=on-failure
+RestartSec=5s
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/cadence
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target

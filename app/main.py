@@ -1,6 +1,7 @@
 from fastapi import Depends, FastAPI
 
 from app.api import (
+    alerts,
     campaigns,
     health,
     ingest,
@@ -57,4 +58,8 @@ app.include_router(
     recipients.router,
     prefix="/api",
     dependencies=[Depends(require_api_key)],
+)
+app.include_router(
+    alerts.router,
+    prefix="/api",
 )

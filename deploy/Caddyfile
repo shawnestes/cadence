@@ -1,0 +1,22 @@
+# Cadence Caddyfile — host-installed Caddy on the EC2 box.
+# Replace the site address with your domain; Caddy provisions TLS via Let's Encrypt.
+
+{$CADENCE_SITE_ADDR:localhost} {
+	encode zstd gzip
+
+	# API, health, metrics, webhooks, unsub all go to uvicorn.
+	@backend {
+		path /api/* /health /metrics /webhook/* /unsub/*
+	}
+	reverse_proxy @backend 127.0.0.1:8000
+
+	# Everything else is the React SPA.
+	root * /opt/cadence/frontend/dist
+	try_files {path} /index.html
+	file_server
+
+	log {
+		output file /var/log/caddy/cadence.log
+		format console
+	}
+}

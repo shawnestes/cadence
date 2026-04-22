@@ -1,5 +1,7 @@
 from functools import lru_cache
+from typing import Any
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -9,6 +11,13 @@ class Settings(BaseSettings):
         env_file=".env",
         extra="ignore",
     )
+
+    @field_validator("alert_tenants", mode="before")
+    @classmethod
+    def _parse_alert_tenants(cls, v: Any) -> list[str]:
+        if isinstance(v, str):
+            return [t.strip() for t in v.split(",") if t.strip()]
+        return v
 
     database_url: str
     log_level: str = "INFO"
@@ -49,6 +58,17 @@ class Settings(BaseSettings):
     mab_min_explore_sends: int = 200
     mab_min_retire_sends: int = 1000
     stats_refresh_interval_seconds: int = 300
+
+    # Reputation monitoring / alerts
+    alert_bounce_warn_rate: float = 0.03
+    alert_bounce_critical_rate: float = 0.05
+    alert_complaint_warn_rate: float = 0.0007
+    alert_complaint_critical_rate: float = 0.001
+    alert_sustained_minutes: int = 30
+    alert_monitor_interval_seconds: int = 300
+    alert_eval_window: str = "24h"
+    slack_webhook_url: str | None = None
+    alert_tenants: list[str] = ["otto"]
 
 
 @lru_cache

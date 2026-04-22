@@ -108,6 +108,7 @@ async def _clean_test_rows():
                 text("DELETE FROM recipients WHERE email LIKE :pat"),
                 {"pat": "%@cadencetests.io"},
             )
+            await s.execute(text("DELETE FROM alerts WHERE tenant = 'otto'"))
             await s.commit()
 
     await _purge()
