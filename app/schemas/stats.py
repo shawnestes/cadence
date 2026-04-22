@@ -7,6 +7,8 @@ class Topline(BaseModel):
     sends: int
     delivered: int
     bounces: int
+    hard_bounces: int
+    soft_bounces: int
     complaints: int
     unique_opens: int
     unique_clicks: int
@@ -37,3 +39,32 @@ class TimeseriesPoint(BaseModel):
 class TimeseriesOut(BaseModel):
     points: list[TimeseriesPoint]
     bucket: str  # "1h" | "1d"
+
+
+class CampaignVolumeRow(BaseModel):
+    campaign_id: str
+    campaign_name: str
+    sends: int
+    delivered: int
+    bounces: int
+    complaints: int
+    delivery_rate: float
+    bounce_rate: float
+    complaint_rate: float
+
+
+class CampaignsVolumeOut(BaseModel):
+    window: str
+    campaigns: list[CampaignVolumeRow]
+
+
+class SESReputationOut(BaseModel):
+    tenant: str
+    sending_enabled: bool
+    production_access_enabled: bool
+    enforcement_status: str | None
+    max_24_hour_send: float
+    sent_last_24_hours: float
+    max_send_rate: float
+    reputation_sending_enabled: bool | None
+    fetched_at: datetime

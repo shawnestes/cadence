@@ -68,6 +68,8 @@ export type Topline = {
   sends: number;
   delivered: number;
   bounces: number;
+  hard_bounces: number;
+  soft_bounces: number;
   complaints: number;
   unique_opens: number;
   unique_clicks: number;
@@ -105,6 +107,35 @@ export type ToplineStreamEvent = {
   data: Topline;
   ts: string;
   window: string;
+};
+
+export type CampaignVolumeRow = {
+  campaign_id: string;
+  campaign_name: string;
+  sends: number;
+  delivered: number;
+  bounces: number;
+  complaints: number;
+  delivery_rate: number;
+  bounce_rate: number;
+  complaint_rate: number;
+};
+
+export type CampaignsVolumeOut = {
+  window: string;
+  campaigns: CampaignVolumeRow[];
+};
+
+export type SESReputationOut = {
+  tenant: string;
+  sending_enabled: boolean;
+  production_access_enabled: boolean;
+  enforcement_status: string | null;
+  max_24_hour_send: number;
+  sent_last_24_hours: number;
+  max_send_rate: number;
+  reputation_sending_enabled: boolean | null;
+  fetched_at: string;
 };
 
 // ------------------ Recipients ------------------

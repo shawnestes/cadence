@@ -2,8 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, Wifi, WifiOff } from "lucide-react";
 
-import { getTimeseries, getTopline, streamTopline } from "@/api/stats";
+import { getCampaignsVolume, getSesReputation, getTimeseries, getTopline, streamTopline } from "@/api/stats";
 import type {
+  CampaignVolumeRow,
+  CampaignsVolumeOut,
+  SESReputationOut,
   StatsBucket,
   StatsWindow,
   TimeseriesOut,
@@ -376,6 +379,25 @@ export function Dashboard() {
     queryFn: () => getTimeseries(statsWindow, bucket, TENANT),
   });
 
+  const {
+    data: campaignsData,
+    isLoading: campaignsLoading,
+    error: campaignsError,
+  } = useQuery<CampaignsVolumeOut>({
+    queryKey: ["campaigns-volume", statsWindow, TENANT],
+    queryFn: () => getCampaignsVolume(statsWindow, TENANT, 10),
+  });
+
+  const {
+    data: sesData,
+    isLoading: sesLoading,
+    error: sesError,
+  } = useQuery<SESReputationOut>({
+    queryKey: ["ses-reputation", TENANT],
+    queryFn: () => getSesReputation(TENANT),
+    retry: false,
+  });
+
   useEffect(() => {
     esRef.current?.close();
     setSseStatus("connecting");
@@ -472,7 +494,7 @@ export function Dashboard() {
           <StatCard
             title="Bounce Rate"
             value={pct(topline.bounce_rate)}
-            sub={`${fmt(topline.bounces)} bounces`}
+            sub={`${fmt(topline.hard_bounces)} hard, ${fmt(topline.soft_bounces)} soft`}
             warn={topline.bounce_rate > 0.03}
             alert={topline.bounce_rate >= 0.05}
           />
@@ -563,12 +585,50 @@ export function Dashboard() {
             <CardTitle>Top 10 Campaigns by Volume</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="flex h-32 flex-col items-center justify-center gap-2 text-center">
-              <span className="text-[0.65rem] font-mono uppercase tracking-[0.15em] text-muted-foreground">Coming Soon</span>
-              <span className="text-xs text-muted-foreground max-w-xs">
-                No backend endpoint for per-campaign volume yet.
-              </span>
-            </div>
+            {campaignsLoading ? (
+              <div className="flex h-32 items-center justify-center text-sm text-muted-foreground">
+                Loading...
+              </div>
+            ) : campaignsError ? (
+              <div className="text-sm text-danger">
+                {(campaignsError as Error).message}
+              </div>
+            ) : !campaignsData || campaignsData.campaigns.length === 0 ? (
+              <div className="flex h-32 items-center justify-center text-sm text-muted-foreground">
+                No campaign data for this window.
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs font-mono">
+                  <thead>
+                    <tr className="border-b border-border">
+                      <th className="pb-2 text-left text-[0.65rem] uppercase tracking-[0.15em] text-muted-foreground font-medium">Campaign</th>
+                      <th className="pb-2 pr-3 text-right text-[0.65rem] uppercase tracking-[0.15em] text-muted-foreground font-medium tabular-nums">Sends</th>
+                      <th className="pb-2 pr-3 text-right text-[0.65rem] uppercase tracking-[0.15em] text-muted-foreground font-medium tabular-nums">Delivery</th>
+                      <th className="pb-2 text-right text-[0.65rem] uppercase tracking-[0.15em] text-muted-foreground font-medium tabular-nums">Bounce</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {campaignsData.campaigns.map((row: CampaignVolumeRow) => (
+                      <tr key={row.campaign_id} className="border-b border-border/40 last:border-0">
+                        <td className="py-1.5 pr-3 truncate max-w-[12rem] text-foreground" title={row.campaign_name}>
+                          {row.campaign_name}
+                        </td>
+                        <td className="py-1.5 pr-3 text-right tabular-nums text-muted-foreground">
+                          {fmt(row.sends)}
+                        </td>
+                        <td className={`py-1.5 pr-3 text-right tabular-nums ${row.delivery_rate < 0.9 ? "text-warn" : "text-foreground"}`}>
+                          {pct(row.delivery_rate)}
+                        </td>
+                        <td className={`py-1.5 text-right tabular-nums ${row.bounce_rate >= 0.05 ? "text-danger" : row.bounce_rate > 0.03 ? "text-warn" : "text-foreground"}`}>
+                          {pct(row.bounce_rate)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </CardContent>
         </Card>
 
@@ -577,12 +637,71 @@ export function Dashboard() {
             <CardTitle>SES Reputation & Account Status</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="flex h-32 flex-col items-center justify-center gap-2 text-center">
-              <span className="text-[0.65rem] font-mono uppercase tracking-[0.15em] text-muted-foreground">Not Wired</span>
-              <span className="text-xs text-muted-foreground max-w-xs">
-                Requires a backend endpoint that proxies SES account reputation data. No fake data shown.
-              </span>
-            </div>
+            {sesLoading ? (
+              <div className="flex h-32 items-center justify-center text-sm text-muted-foreground">
+                Loading...
+              </div>
+            ) : sesError ? (
+              <div className="flex h-32 flex-col items-center justify-center gap-1 text-center">
+                <span className="text-[0.65rem] font-mono uppercase tracking-[0.15em] text-muted-foreground">Not Available</span>
+                <span className="text-xs text-muted-foreground">{(sesError as Error).message}</span>
+              </div>
+            ) : sesData ? (
+              <div className="space-y-4 font-mono text-xs">
+                <div className="grid grid-cols-2 gap-x-6 gap-y-2">
+                  <div>
+                    <div className="text-[0.65rem] uppercase tracking-[0.15em] text-muted-foreground">Sending</div>
+                    <div className={sesData.sending_enabled ? "text-success" : "text-danger"}>
+                      {sesData.sending_enabled ? "Enabled" : "Disabled"}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[0.65rem] uppercase tracking-[0.15em] text-muted-foreground">Production</div>
+                    <div className={sesData.production_access_enabled ? "text-success" : "text-warn"}>
+                      {sesData.production_access_enabled ? "Enabled" : "Sandbox"}
+                    </div>
+                  </div>
+                  {sesData.enforcement_status && (
+                    <div className="col-span-2">
+                      <div className="text-[0.65rem] uppercase tracking-[0.15em] text-muted-foreground">Enforcement</div>
+                      <div className="text-danger">{sesData.enforcement_status}</div>
+                    </div>
+                  )}
+                  <div>
+                    <div className="text-[0.65rem] uppercase tracking-[0.15em] text-muted-foreground">Max Rate</div>
+                    <div className="tabular-nums text-foreground">{sesData.max_send_rate.toFixed(1)}/s</div>
+                  </div>
+                  <div>
+                    <div className="text-[0.65rem] uppercase tracking-[0.15em] text-muted-foreground">24h Quota</div>
+                    <div className="tabular-nums text-foreground">{fmt(Math.round(sesData.max_24_hour_send))}</div>
+                  </div>
+                </div>
+                <div>
+                  <div className="flex justify-between mb-1">
+                    <span className="text-[0.65rem] uppercase tracking-[0.15em] text-muted-foreground">Sent Last 24h</span>
+                    <span className="tabular-nums text-muted-foreground">
+                      {fmt(Math.round(sesData.sent_last_24_hours))} / {fmt(Math.round(sesData.max_24_hour_send))}
+                    </span>
+                  </div>
+                  <div className="h-2 w-full bg-border overflow-hidden">
+                    <div
+                      className={`h-full transition-all ${
+                        sesData.max_24_hour_send > 0 && sesData.sent_last_24_hours / sesData.max_24_hour_send >= 0.9
+                          ? "bg-danger"
+                          : sesData.max_24_hour_send > 0 && sesData.sent_last_24_hours / sesData.max_24_hour_send >= 0.7
+                            ? "bg-warn"
+                            : "bg-primary"
+                      }`}
+                      style={{
+                        width: sesData.max_24_hour_send > 0
+                          ? `${Math.min((sesData.sent_last_24_hours / sesData.max_24_hour_send) * 100, 100).toFixed(1)}%`
+                          : "0%",
+                      }}
+                    />
+                  </div>
+                </div>
+              </div>
+            ) : null}
           </CardContent>
         </Card>
       </div>

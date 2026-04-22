@@ -1,5 +1,7 @@
 import { apiFetch } from "@/api/client";
 import type {
+  CampaignsVolumeOut,
+  SESReputationOut,
   StatsBucket,
   StatsWindow,
   TimeseriesOut,
@@ -22,6 +24,22 @@ export function getTimeseries(
 ): Promise<TimeseriesOut> {
   return apiFetch<TimeseriesOut>(
     `/api/stats/timeseries?window=${encodeURIComponent(window)}&bucket=${encodeURIComponent(bucket)}&tenant=${encodeURIComponent(tenant)}`,
+  );
+}
+
+export function getCampaignsVolume(
+  window: StatsWindow = "24h",
+  tenant = "otto",
+  limit = 10,
+): Promise<CampaignsVolumeOut> {
+  return apiFetch<CampaignsVolumeOut>(
+    `/api/stats/campaigns-volume?window=${encodeURIComponent(window)}&tenant=${encodeURIComponent(tenant)}&limit=${limit}`,
+  );
+}
+
+export function getSesReputation(tenant = "otto"): Promise<SESReputationOut> {
+  return apiFetch<SESReputationOut>(
+    `/api/stats/ses-reputation?tenant=${encodeURIComponent(tenant)}`,
   );
 }
 
