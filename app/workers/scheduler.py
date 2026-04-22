@@ -8,7 +8,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.core.config import get_settings
 from app.core.logging import configure_logging
-from app.workers import otto_sync, send_worker, workflow_tick
+from app.workers import otto_sync, send_worker, stats_rollup, variant_retirement, workflow_tick
 
 
 async def main() -> None:
@@ -36,6 +36,22 @@ async def main() -> None:
         "interval",
         seconds=get_settings().workflow_tick_interval_seconds,
         id="workflow_tick",
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        stats_rollup.run_once,
+        "interval",
+        seconds=get_settings().stats_refresh_interval_seconds,
+        id="stats_rollup",
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        variant_retirement.run_once,
+        "interval",
+        hours=6,
+        id="variant_retirement",
         max_instances=1,
         coalesce=True,
     )

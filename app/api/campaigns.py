@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.esp.factory import get_esp_adapter
 from app.core.db import get_db
+from app.domain.variant_picker import pick_variant
 from app.models.campaign import Campaign
 from app.models.recipient import Recipient
 from app.models.send import Send
@@ -101,6 +102,27 @@ async def update_campaign(
     return CampaignOut.model_validate(row)
 
 
+@router.post("/campaigns/{campaign_id}/generate")
+async def trigger_generation(
+    campaign_id: UUID,
+    variants_per_cohort: int = 5,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    c = (
+        await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    ).scalar_one_or_none()
+    if c is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="campaign not found")
+    from app.workers.ai_generator import generate_for_campaign
+    result = await generate_for_campaign(campaign_id, variants_per_cohort=variants_per_cohort)
+    return {
+        "cohorts_processed": result.cohorts_processed,
+        "templates_created": result.templates_created,
+        "variants_total": result.variants_total,
+        "errors": result.errors,
+    }
+
+
 @router.post("/campaigns/{campaign_id}/send", response_model=CampaignSendResult)
 async def send_campaign(
     campaign_id: UUID,
@@ -146,27 +168,24 @@ async def send_campaign(
             detail="recipient_ids or email_list required",
         )
 
-    template = (
-        await db.execute(
-            select(Template)
-            .where(Template.campaign_id == campaign.id)
-            .where(Template.status == "approved")
-            .order_by(Template.created_at.asc())
-            .limit(1)
-        )
-    ).scalar_one_or_none()
-
-    if template is None:
-        return CampaignSendResult(
-            queued=0,
-            skipped_no_template=len(recipients),
-            skipped_not_found=skipped_not_found,
-        )
-
     esp_name = get_esp_adapter().name
     now = datetime.now(timezone.utc)
 
+    queued = 0
+    skipped_no_template = 0
+
     for r in recipients:
+        cohort_key = r.vertical
+        template = await pick_variant(
+            db, tenant=campaign.tenant, campaign_id=campaign.id, cohort_key=cohort_key
+        )
+        if template is None:
+            template = await pick_variant(
+                db, tenant=campaign.tenant, campaign_id=campaign.id, cohort_key=None
+            )
+        if template is None:
+            skipped_no_template += 1
+            continue
         db.add(
             Send(
                 tenant=campaign.tenant,
@@ -181,10 +200,11 @@ async def send_campaign(
                 queued_at=now,
             )
         )
+        queued += 1
     await db.commit()
 
     return CampaignSendResult(
-        queued=len(recipients),
-        skipped_no_template=0,
+        queued=queued,
+        skipped_no_template=skipped_no_template,
         skipped_not_found=skipped_not_found,
     )

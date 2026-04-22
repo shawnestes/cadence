@@ -39,6 +39,17 @@ class Settings(BaseSettings):
     # Workflow engine
     workflow_tick_interval_seconds: int = 10
 
+    # AI
+    ai_backend: str = "mock"
+    anthropic_api_key: str | None = None
+    anthropic_generation_model: str = "claude-sonnet-4-5"
+    anthropic_classification_model: str = "claude-haiku-4-5"
+
+    # MAB
+    mab_min_explore_sends: int = 200
+    mab_min_retire_sends: int = 1000
+    stats_refresh_interval_seconds: int = 300
+
 
 @lru_cache
 def get_settings() -> Settings:

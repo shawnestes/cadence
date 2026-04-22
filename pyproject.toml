@@ -20,6 +20,7 @@ dependencies = [
     "boto3>=1.35",
     "itsdangerous>=2.2",
     "cryptography>=43",
+    "anthropic>=0.40",
 ]
 
 [dependency-groups]

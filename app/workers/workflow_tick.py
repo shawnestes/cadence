@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.esp.factory import get_esp_adapter
 from app.core.db import async_session_factory
+from app.domain.variant_picker import pick_variant
 from app.domain.workflow_defs import (
     BranchNode,
     ClickUrlMatchCondition,
@@ -157,8 +158,6 @@ async def _execute_node(
 
     if isinstance(node, SendNode):
         await _enqueue_send(node, journey, workflow, session, now)
-        journey.current_node_id = node.next
-        journey.next_action_at = now
         return
 
     if isinstance(node, WaitNode):
@@ -191,22 +190,31 @@ async def _enqueue_send(
     session: AsyncSession,
     now: datetime,
 ) -> None:
-    tmpl_stmt = (
-        select(Template)
-        .where(Template.tenant == journey.tenant)
-        .where(Template.campaign_id == node.campaign_id)
-        .where(Template.status == "approved")
-        .limit(1)
+    recipient = await session.get(Recipient, journey.recipient_id)
+    cohort_key = recipient.vertical if recipient is not None else None
+    template = await pick_variant(
+        session,
+        tenant=journey.tenant,
+        campaign_id=node.campaign_id,
+        cohort_key=cohort_key,
     )
-    template = (await session.execute(tmpl_stmt)).scalar_one_or_none()
+    if template is None:
+        template = await pick_variant(
+            session,
+            tenant=journey.tenant,
+            campaign_id=node.campaign_id,
+            cohort_key=None,
+        )
     if template is None:
         log.warning(
             "workflow_tick.no_approved_template",
             journey_id=str(journey.id),
             tenant=journey.tenant,
-            campaign_id=node.campaign_id,
+            campaign_id=str(node.campaign_id),
             node_id=journey.current_node_id,
         )
+        journey.current_node_id = node.next
+        journey.next_action_at = now
         return
 
     esp = get_esp_adapter()
@@ -224,6 +232,8 @@ async def _enqueue_send(
         queued_at=now,
     )
     session.add(send)
+    journey.current_node_id = node.next
+    journey.next_action_at = now
 
 
 async def _evaluate_condition(
