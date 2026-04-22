@@ -18,6 +18,24 @@ class Settings(BaseSettings):
     otto_unsub_endpoint: str | None = None
     otto_api_key: str | None = None
 
+    # ESP / SES
+    esp_backend: str = "noop"
+    aws_region: str = "us-east-1"
+    ses_configuration_set: str | None = None
+    ses_sending_domain: str | None = None
+    ses_from_address: str | None = None
+    ses_managed_pool_name: str | None = None
+    sns_topic_arn_ses_events: str | None = None
+    sns_verify_signatures: bool = True
+
+    # Unsub
+    unsub_signing_key: str
+    unsub_base_url: str = "http://localhost:8000"
+
+    # Rate limiting
+    send_rate_limit_per_second: int = 14
+    send_daily_quota: int = 50000
+
 
 @lru_cache
 def get_settings() -> Settings:

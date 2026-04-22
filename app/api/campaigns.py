@@ -1,0 +1,190 @@
+from datetime import datetime, timezone
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.adapters.esp.factory import get_esp_adapter
+from app.core.db import get_db
+from app.models.campaign import Campaign
+from app.models.recipient import Recipient
+from app.models.send import Send
+from app.models.template import Template
+from app.schemas.campaign import (
+    CampaignIn,
+    CampaignListOut,
+    CampaignOut,
+    CampaignSendRequest,
+    CampaignSendResult,
+    CampaignUpdate,
+)
+
+router = APIRouter(tags=["campaigns"])
+
+
+@router.post("/campaigns", response_model=CampaignOut, status_code=status.HTTP_201_CREATED)
+async def create_campaign(
+    payload: CampaignIn,
+    db: AsyncSession = Depends(get_db),
+) -> CampaignOut:
+    row = Campaign(
+        tenant=payload.tenant,
+        workflow_id=payload.workflow_id,
+        node_id=payload.node_id,
+        name=payload.name,
+        vertical=payload.vertical,
+        cohort_filter=payload.cohort_filter,
+        ai_brief=payload.ai_brief,
+        mab_config=payload.mab_config,
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return CampaignOut.model_validate(row)
+
+
+@router.get("/campaigns", response_model=CampaignListOut)
+async def list_campaigns(
+    tenant: str = Query(default="otto"),
+    status_filter: str | None = Query(default=None, alias="status"),
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    db: AsyncSession = Depends(get_db),
+) -> CampaignListOut:
+    base = select(Campaign).where(Campaign.tenant == tenant)
+    count_q = select(func.count()).select_from(Campaign).where(Campaign.tenant == tenant)
+    if status_filter is not None:
+        base = base.where(Campaign.status == status_filter)
+        count_q = count_q.where(Campaign.status == status_filter)
+
+    base = base.order_by(Campaign.created_at.desc()).limit(limit).offset(offset)
+    rows = (await db.execute(base)).scalars().all()
+    total = (await db.execute(count_q)).scalar_one()
+
+    return CampaignListOut(
+        campaigns=[CampaignOut.model_validate(r) for r in rows],
+        total=int(total),
+    )
+
+
+@router.get("/campaigns/{campaign_id}", response_model=CampaignOut)
+async def get_campaign(
+    campaign_id: UUID,
+    db: AsyncSession = Depends(get_db),
+) -> CampaignOut:
+    row = (
+        await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+    return CampaignOut.model_validate(row)
+
+
+@router.patch("/campaigns/{campaign_id}", response_model=CampaignOut)
+async def update_campaign(
+    campaign_id: UUID,
+    payload: CampaignUpdate,
+    db: AsyncSession = Depends(get_db),
+) -> CampaignOut:
+    row = (
+        await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+    data = payload.model_dump(exclude_unset=True)
+    for k, v in data.items():
+        if v is not None:
+            setattr(row, k, v)
+    await db.commit()
+    await db.refresh(row)
+    return CampaignOut.model_validate(row)
+
+
+@router.post("/campaigns/{campaign_id}/send", response_model=CampaignSendResult)
+async def send_campaign(
+    campaign_id: UUID,
+    payload: CampaignSendRequest,
+    db: AsyncSession = Depends(get_db),
+) -> CampaignSendResult:
+    campaign = (
+        await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    ).scalar_one_or_none()
+    if campaign is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+
+    skipped_not_found = 0
+    recipients: list[Recipient] = []
+
+    if payload.recipient_ids:
+        rows = (
+            await db.execute(
+                select(Recipient)
+                .where(Recipient.tenant == payload.tenant)
+                .where(Recipient.id.in_(payload.recipient_ids))
+            )
+        ).scalars().all()
+        found_ids = {r.id for r in rows}
+        skipped_not_found = len([rid for rid in payload.recipient_ids if rid not in found_ids])
+        recipients = list(rows)
+    elif payload.email_list:
+        rows = (
+            await db.execute(
+                select(Recipient)
+                .where(Recipient.tenant == payload.tenant)
+                .where(Recipient.email.in_(payload.email_list))
+            )
+        ).scalars().all()
+        found_emails = {r.email.lower() for r in rows}
+        skipped_not_found = len(
+            [e for e in payload.email_list if e.lower() not in found_emails]
+        )
+        recipients = list(rows)
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="recipient_ids or email_list required",
+        )
+
+    template = (
+        await db.execute(
+            select(Template)
+            .where(Template.campaign_id == campaign.id)
+            .where(Template.status == "approved")
+            .order_by(Template.created_at.asc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+    if template is None:
+        return CampaignSendResult(
+            queued=0,
+            skipped_no_template=len(recipients),
+            skipped_not_found=skipped_not_found,
+        )
+
+    esp_name = get_esp_adapter().name
+    now = datetime.now(timezone.utc)
+
+    for r in recipients:
+        db.add(
+            Send(
+                tenant=campaign.tenant,
+                campaign_id=campaign.id,
+                template_id=template.id,
+                recipient_id=r.id,
+                cohort_key=template.cohort_key,
+                variant_label=template.variant_label,
+                esp=esp_name,
+                rendered_subject=template.subject,
+                status="queued",
+                queued_at=now,
+            )
+        )
+    await db.commit()
+
+    return CampaignSendResult(
+        queued=len(recipients),
+        skipped_no_template=0,
+        skipped_not_found=skipped_not_found,
+    )

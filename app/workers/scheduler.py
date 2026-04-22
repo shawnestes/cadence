@@ -8,7 +8,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.core.config import get_settings
 from app.core.logging import configure_logging
-from app.workers import otto_sync
+from app.workers import otto_sync, send_worker
 
 
 async def main() -> None:
@@ -22,6 +22,14 @@ async def main() -> None:
         seconds=60,
         id="otto_unsub_sync",
         max_instances=1,
+    )
+    scheduler.add_job(
+        send_worker.run_once,
+        "interval",
+        seconds=1,
+        id="send_worker",
+        max_instances=1,
+        coalesce=True,
     )
     scheduler.start()
     log.info("scheduler.started", jobs=[j.id for j in scheduler.get_jobs()])

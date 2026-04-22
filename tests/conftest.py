@@ -62,6 +62,27 @@ async def _clean_test_rows():
     async def _purge() -> None:
         async with async_session_factory() as s:
             await s.execute(
+                text(
+                    "DELETE FROM events WHERE recipient_id IN "
+                    "(SELECT id FROM recipients WHERE email LIKE :pat)"
+                ),
+                {"pat": "%@cadencetests.io"},
+            )
+            await s.execute(
+                text(
+                    "DELETE FROM sends WHERE recipient_id IN "
+                    "(SELECT id FROM recipients WHERE email LIKE :pat)"
+                ),
+                {"pat": "%@cadencetests.io"},
+            )
+            await s.execute(
+                text(
+                    "DELETE FROM templates WHERE campaign_id IN "
+                    "(SELECT id FROM campaigns WHERE name LIKE 'test-%')"
+                )
+            )
+            await s.execute(text("DELETE FROM campaigns WHERE name LIKE 'test-%'"))
+            await s.execute(
                 text("DELETE FROM unsub_outbox WHERE email LIKE :pat"),
                 {"pat": "%@cadencetests.io"},
             )
