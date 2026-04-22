@@ -8,6 +8,7 @@ import { Recipients } from "@/pages/Recipients";
 import { RecipientDetail } from "@/pages/RecipientDetail";
 import { Suppressions } from "@/pages/Suppressions";
 import { Workflows } from "@/pages/Workflows";
+import { WorkflowDetail } from "@/pages/WorkflowDetail";
 
 export default function App() {
   return (
@@ -21,6 +22,7 @@ export default function App() {
         <Route path="/campaigns" element={<Campaigns />} />
         <Route path="/campaigns/:id" element={<CampaignDetail />} />
         <Route path="/workflows" element={<Workflows />} />
+        <Route path="/workflows/:id" element={<WorkflowDetail />} />
       </Route>
     </Routes>
   );
