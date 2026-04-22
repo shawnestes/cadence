@@ -47,7 +47,13 @@ export function Recipients() {
 
   return (
     <div className="space-y-6">
-      <h2 className="text-2xl font-semibold">Recipients</h2>
+      {/* Masthead */}
+      <div className="border-b border-border pb-4">
+        <h1 className="text-2xl font-semibold tracking-tight">Recipients</h1>
+        <p className="mt-1 text-xs font-mono text-muted-foreground uppercase tracking-[0.1em]">
+          Email address registry & journey history
+        </p>
+      </div>
 
       <form
         className="flex gap-2"
@@ -78,9 +84,9 @@ export function Recipients() {
         )}
       </form>
 
-      {isLoading && <div>Loading...</div>}
+      {isLoading && <div className="text-sm font-mono text-muted-foreground">Loading...</div>}
       {error && (
-        <div className="text-destructive">{(error as Error).message}</div>
+        <div className="text-sm font-mono text-danger">{(error as Error).message}</div>
       )}
 
       {!isLoading && !error && (
@@ -92,29 +98,29 @@ export function Recipients() {
                 <Th>Tenant</Th>
                 <Th>Vertical</Th>
                 <Th>Status</Th>
-                <Th>Last seen</Th>
+                <Th>Last Seen</Th>
                 <Th></Th>
               </Tr>
             </Thead>
             <Tbody>
               {rows.length === 0 && (
                 <Tr>
-                  <Td colSpan={6} className="text-muted-foreground">
+                  <Td colSpan={6} className="text-muted-foreground font-mono text-xs">
                     No recipients.
                   </Td>
                 </Tr>
               )}
               {rows.map((r) => (
                 <Tr key={r.id}>
-                  <Td className="font-mono text-xs">{r.email}</Td>
-                  <Td>{r.tenant}</Td>
-                  <Td>{r.vertical}</Td>
-                  <Td>{r.status}</Td>
-                  <Td>{formatDate(r.last_seen_at)}</Td>
+                  <Td className="font-mono text-xs tabular-nums">{r.email}</Td>
+                  <Td className="font-mono text-xs">{r.tenant}</Td>
+                  <Td className="font-mono text-xs">{r.vertical}</Td>
+                  <Td className="font-mono text-xs">{r.status}</Td>
+                  <Td className="font-mono text-xs tabular-nums">{formatDate(r.last_seen_at)}</Td>
                   <Td>
                     <Link
                       to={`/recipients/${r.id}`}
-                      className="text-sm font-medium underline-offset-4 hover:underline"
+                      className="text-xs font-mono text-primary hover:underline underline-offset-4"
                     >
                       View
                     </Link>
@@ -124,8 +130,8 @@ export function Recipients() {
             </Tbody>
           </Table>
 
-          <div className="flex items-center justify-between text-sm">
-            <span className="text-muted-foreground">
+          <div className="flex items-center justify-between text-xs font-mono text-muted-foreground">
+            <span>
               {total} total &middot; page {page + 1}
             </span>
             <div className="flex gap-2">

@@ -20,7 +20,7 @@ export function Thead({
 }: React.HTMLAttributes<HTMLTableSectionElement>) {
   return (
     <thead
-      className={cn("border-b border-border bg-muted/40", className)}
+      className={cn("border-b border-border", className)}
       {...props}
     />
   );
@@ -40,7 +40,7 @@ export function Tr({
   return (
     <tr
       className={cn(
-        "border-b border-border transition-colors hover:bg-muted/30",
+        "border-b border-border transition-colors hover:bg-muted",
         className,
       )}
       {...props}
@@ -55,7 +55,7 @@ export function Th({
   return (
     <th
       className={cn(
-        "h-10 px-4 text-left align-middle font-medium text-muted-foreground",
+        "h-9 px-4 text-left align-middle text-[0.7rem] font-medium uppercase tracking-[0.15em] text-muted-foreground font-mono",
         className,
       )}
       {...props}
@@ -67,5 +67,5 @@ export function Td({
   className,
   ...props
 }: React.TdHTMLAttributes<HTMLTableCellElement>) {
-  return <td className={cn("p-2 px-4 align-middle", className)} {...props} />;
+  return <td className={cn("py-2 px-4 align-middle", className)} {...props} />;
 }

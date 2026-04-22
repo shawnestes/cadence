@@ -1,31 +1,31 @@
-import { Ban, GitBranch, LayoutDashboard, Megaphone, Users } from "lucide-react";
 import { NavLink } from "react-router-dom";
 
 import { cn } from "@/lib/utils";
 
 const items = [
-  { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { to: "/recipients", label: "Recipients", icon: Users },
-  { to: "/suppressions", label: "Suppressions", icon: Ban },
-  { to: "/campaigns", label: "Campaigns", icon: Megaphone },
-  { to: "/workflows", label: "Workflows", icon: GitBranch },
+  { to: "/dashboard", label: "Dashboard" },
+  { to: "/recipients", label: "Recipients" },
+  { to: "/suppressions", label: "Suppressions" },
+  { to: "/campaigns", label: "Campaigns" },
+  { to: "/workflows", label: "Workflows" },
 ];
 
-export function SidebarNav() {
+export function TopNav() {
   return (
-    <nav className="flex flex-col gap-1">
-      {items.map(({ to, label, icon: Icon }) => (
+    <nav className="flex items-stretch h-14 gap-1">
+      {items.map(({ to, label }) => (
         <NavLink
           key={to}
           to={to}
           className={({ isActive }) =>
             cn(
-              "flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors",
-              isActive ? "bg-accent text-accent-foreground" : "hover:bg-accent/50",
+              "relative flex items-center px-3 text-sm font-sans font-medium tracking-wide transition-colors",
+              isActive
+                ? "text-foreground after:absolute after:left-3 after:right-3 after:bottom-0 after:h-[2px] after:bg-primary"
+                : "text-muted-foreground hover:text-foreground",
             )
           }
         >
-          <Icon className="size-4" />
           {label}
         </NavLink>
       ))}

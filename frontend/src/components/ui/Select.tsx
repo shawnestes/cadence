@@ -20,7 +20,7 @@ export function Select({
   return (
     <select
       className={cn(
-        "h-10 rounded-md border border-input bg-background px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50",
+        "h-9 rounded border border-input bg-background px-3 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50",
         className,
       )}
       value={value}

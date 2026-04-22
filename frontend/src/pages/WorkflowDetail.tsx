@@ -325,11 +325,11 @@ function validateDefinition(
 }
 
 // ---------------------------------------------------------------------------
-// Custom node components
+// Custom node components — dark DISPATCH theme
 // ---------------------------------------------------------------------------
 const nodeStyle: React.CSSProperties = {
   padding: "8px 12px",
-  borderRadius: 6,
+  borderRadius: 2,
   fontSize: 12,
   display: "flex",
   flexDirection: "column",
@@ -339,25 +339,34 @@ const nodeStyle: React.CSSProperties = {
   minHeight: NODE_HEIGHT,
   boxSizing: "border-box",
   cursor: "pointer",
-  border: "2px solid transparent",
+  background: "oklch(0.14 0.01 250)",
+  border: "1px solid oklch(0.25 0.01 250)",
+};
+
+// Amber handle style for React Flow
+const handleStyle: React.CSSProperties = {
+  background: "oklch(0.82 0.18 85)",
+  border: "1px solid oklch(0.82 0.18 85)",
+  width: 8,
+  height: 8,
 };
 
 function NodeShell({
   children,
-  color,
   selected,
+  accentColor = "oklch(0.62 0.02 250)",
 }: {
   children: React.ReactNode;
-  color: string;
   selected: boolean;
+  accentColor?: string;
 }) {
   return (
     <div
       style={{
         ...nodeStyle,
-        background: color,
-        borderColor: selected ? "#6366f1" : "transparent",
-        boxShadow: selected ? "0 0 0 2px #6366f133" : "0 1px 3px rgba(0,0,0,0.12)",
+        borderColor: selected ? "oklch(0.82 0.18 85)" : "oklch(0.25 0.01 250)",
+        borderLeftColor: accentColor,
+        borderLeftWidth: 2,
       }}
     >
       {children}
@@ -367,22 +376,22 @@ function NodeShell({
 
 function EntryNodeComponent({ data, selected }: NodeProps) {
   return (
-    <NodeShell color="#dbeafe" selected={!!selected}>
-      <Handle type="source" position={Position.Right} />
-      <div className="font-semibold text-blue-800">Entry</div>
-      <div className="text-blue-600 text-xs truncate">{data.id}</div>
+    <NodeShell selected={!!selected} accentColor="oklch(0.72 0.17 155)">
+      <Handle type="source" position={Position.Right} style={handleStyle} />
+      <div className="font-mono text-xs font-semibold" style={{ color: "oklch(0.72 0.17 155)" }}>ENTRY</div>
+      <div className="font-mono text-[10px] truncate" style={{ color: "oklch(0.62 0.02 250)" }}>{data.id}</div>
     </NodeShell>
   );
 }
 
 function SendNodeComponent({ data, selected }: NodeProps) {
   return (
-    <NodeShell color="#dcfce7" selected={!!selected}>
-      <Handle type="target" position={Position.Left} />
-      <Handle type="source" position={Position.Right} />
-      <div className="font-semibold text-green-800">Send</div>
-      <div className="text-green-600 text-xs truncate">
-        {data.campaign_id || <span className="italic opacity-60">no campaign</span>}
+    <NodeShell selected={!!selected} accentColor="oklch(0.82 0.18 85)">
+      <Handle type="target" position={Position.Left} style={handleStyle} />
+      <Handle type="source" position={Position.Right} style={handleStyle} />
+      <div className="font-mono text-xs font-semibold" style={{ color: "oklch(0.82 0.18 85)" }}>SEND</div>
+      <div className="font-mono text-[10px] truncate" style={{ color: "oklch(0.62 0.02 250)" }}>
+        {data.campaign_id || "no campaign"}
       </div>
     </NodeShell>
   );
@@ -390,23 +399,23 @@ function SendNodeComponent({ data, selected }: NodeProps) {
 
 function WaitNodeComponent({ data, selected }: NodeProps) {
   return (
-    <NodeShell color="#fef9c3" selected={!!selected}>
-      <Handle type="target" position={Position.Left} />
-      <Handle type="source" position={Position.Right} />
-      <div className="font-semibold text-yellow-800">Wait</div>
-      <div className="text-yellow-600 text-xs">{data.duration || "—"}</div>
+    <NodeShell selected={!!selected} accentColor="oklch(0.78 0.18 75)">
+      <Handle type="target" position={Position.Left} style={handleStyle} />
+      <Handle type="source" position={Position.Right} style={handleStyle} />
+      <div className="font-mono text-xs font-semibold" style={{ color: "oklch(0.78 0.18 75)" }}>WAIT</div>
+      <div className="font-mono text-[10px]" style={{ color: "oklch(0.62 0.02 250)" }}>{data.duration || "—"}</div>
     </NodeShell>
   );
 }
 
 function BranchNodeComponent({ data, selected }: NodeProps) {
   return (
-    <NodeShell color="#fce7f3" selected={!!selected}>
-      <Handle type="target" position={Position.Left} />
-      <Handle type="source" position={Position.Right} id="if_true" style={{ top: "30%" }} />
-      <Handle type="source" position={Position.Right} id="if_false" style={{ top: "70%" }} />
-      <div className="font-semibold text-pink-800">Branch</div>
-      <div className="text-pink-600 text-xs truncate">
+    <NodeShell selected={!!selected} accentColor="oklch(0.70 0.18 290)">
+      <Handle type="target" position={Position.Left} style={handleStyle} />
+      <Handle type="source" position={Position.Right} id="if_true" style={{ ...handleStyle, top: "30%" }} />
+      <Handle type="source" position={Position.Right} id="if_false" style={{ ...handleStyle, top: "70%" }} />
+      <div className="font-mono text-xs font-semibold" style={{ color: "oklch(0.70 0.18 290)" }}>BRANCH</div>
+      <div className="font-mono text-[10px] truncate" style={{ color: "oklch(0.62 0.02 250)" }}>
         {data.condition?.kind ?? "—"}
       </div>
     </NodeShell>
@@ -415,10 +424,10 @@ function BranchNodeComponent({ data, selected }: NodeProps) {
 
 function ExitNodeComponent({ data, selected }: NodeProps) {
   return (
-    <NodeShell color="#f3f4f6" selected={!!selected}>
-      <Handle type="target" position={Position.Left} />
-      <div className="font-semibold text-gray-700">Exit</div>
-      <div className="text-gray-500 text-xs">{data.reason || "completed"}</div>
+    <NodeShell selected={!!selected} accentColor="oklch(0.62 0.25 25)">
+      <Handle type="target" position={Position.Left} style={handleStyle} />
+      <div className="font-mono text-xs font-semibold" style={{ color: "oklch(0.62 0.25 25)" }}>EXIT</div>
+      <div className="font-mono text-[10px]" style={{ color: "oklch(0.62 0.02 250)" }}>{data.reason || "completed"}</div>
     </NodeShell>
   );
 }
@@ -462,13 +471,13 @@ function PropertyPanel({ node, onChange, campaigns }: PropertyPanelProps) {
   return (
     <div className="space-y-4 p-4">
       <div>
-        <div className="text-xs text-muted-foreground mb-1">Node ID</div>
-        <div className="font-mono text-sm bg-muted/40 rounded px-2 py-1">{id}</div>
+        <div className="text-[0.65rem] font-mono uppercase tracking-[0.12em] text-muted-foreground mb-1">Node ID</div>
+        <div className="font-mono text-xs bg-muted border border-border rounded px-2 py-1 tabular-nums">{id}</div>
       </div>
 
       <div>
-        <div className="text-xs text-muted-foreground mb-1">Type</div>
-        <div className="text-sm font-medium capitalize">{type}</div>
+        <div className="text-[0.65rem] font-mono uppercase tracking-[0.12em] text-muted-foreground mb-1">Type</div>
+        <div className="text-xs font-mono uppercase">{type}</div>
       </div>
 
       {type === "entry" && (
@@ -740,10 +749,10 @@ export function WorkflowDetail() {
   }, [selectedNode, setRfNodes, setRfEdges]);
 
   if (!id) return <div>Missing workflow id</div>;
-  if (workflowQuery.isLoading) return <div>Loading...</div>;
+  if (workflowQuery.isLoading) return <div className="text-sm font-mono text-muted-foreground">Loading...</div>;
   if (workflowQuery.error) {
     return (
-      <div className="text-destructive">
+      <div className="text-sm font-mono text-danger">
         {(workflowQuery.error as Error).message}
       </div>
     );
@@ -774,9 +783,9 @@ export function WorkflowDetail() {
       <div className="flex items-center gap-3 px-4 py-2 border-b border-border bg-card flex-shrink-0 flex-wrap">
         <Link
           to="/workflows"
-          className="text-sm text-muted-foreground hover:underline flex-shrink-0"
+          className="text-xs font-mono uppercase tracking-[0.1em] text-muted-foreground hover:text-foreground flex-shrink-0"
         >
-          ← Workflows
+          &larr; Workflows
         </Link>
 
         {/* Name */}
@@ -806,7 +815,7 @@ export function WorkflowDetail() {
         )}
 
         <Badge variant={statusVariant(wfStatus)}>{wfStatus}</Badge>
-        <span className="text-xs text-muted-foreground">v{wf.version}</span>
+        <span className="text-xs font-mono tabular-nums text-muted-foreground">v{wf.version}</span>
 
         <div className="flex-1" />
 
@@ -851,7 +860,7 @@ export function WorkflowDetail() {
 
       {/* Error / success banners */}
       {saveErrors.length > 0 && (
-        <div className="bg-destructive/10 border-b border-destructive/20 px-4 py-2 text-sm text-destructive flex-shrink-0">
+        <div className="bg-[oklch(0.62_0.25_25_/_0.1)] border-b border-[oklch(0.62_0.25_25_/_0.2)] px-4 py-2 text-sm font-mono text-danger flex-shrink-0">
           <strong>Validation errors:</strong>
           <ul className="list-disc pl-5 mt-1">
             {saveErrors.map((e, i) => (
@@ -861,12 +870,12 @@ export function WorkflowDetail() {
         </div>
       )}
       {mutError && (
-        <div className="bg-destructive/10 border-b border-destructive/20 px-4 py-2 text-sm text-destructive flex-shrink-0">
+        <div className="bg-[oklch(0.62_0.25_25_/_0.1)] border-b border-[oklch(0.62_0.25_25_/_0.2)] px-4 py-2 text-sm font-mono text-danger flex-shrink-0">
           {mutError}
         </div>
       )}
       {successMsg && (
-        <div className="bg-green-50 border-b border-green-200 px-4 py-2 text-sm text-green-700 flex-shrink-0">
+        <div className="border-b border-[oklch(0.72_0.17_155_/_0.3)] bg-[oklch(0.72_0.17_155_/_0.1)] px-4 py-2 text-sm font-mono text-success flex-shrink-0">
           {successMsg}
         </div>
       )}
@@ -874,16 +883,16 @@ export function WorkflowDetail() {
       {/* Canvas + panel */}
       <div className="flex flex-1 min-h-0">
         {/* Left toolbar */}
-        <div className="flex flex-col gap-2 p-2 border-r border-border bg-card flex-shrink-0 w-24">
-          <div className="text-xs text-muted-foreground font-medium px-1 py-1">
-            Add node
+        <div className="flex flex-col gap-1.5 p-2 border-r border-border bg-card flex-shrink-0 w-24">
+          <div className="text-[0.6rem] font-mono uppercase tracking-[0.15em] text-muted-foreground px-1 py-1">
+            Add Node
           </div>
           {ADD_NODE_TYPES.map(({ label, type }) => (
             <button
               key={type}
               disabled={isReadOnly}
               onClick={() => handleAddNode(type)}
-              className="text-xs rounded border border-border px-2 py-1.5 hover:bg-accent disabled:opacity-50 text-left"
+              className="text-[0.65rem] font-mono rounded border border-border px-2 py-1.5 hover:bg-muted disabled:opacity-50 text-left transition-colors"
             >
               {label}
             </button>
@@ -893,7 +902,7 @@ export function WorkflowDetail() {
               <div className="mt-2 border-t border-border pt-2" />
               <button
                 onClick={handleDeleteSelected}
-                className="text-xs rounded border border-destructive/40 px-2 py-1.5 text-destructive hover:bg-destructive/10 text-left"
+                className="text-[0.65rem] font-mono rounded border border-[oklch(0.62_0.25_25_/_0.4)] px-2 py-1.5 text-danger hover:bg-[oklch(0.62_0.25_25_/_0.1)] text-left transition-colors"
               >
                 Delete
               </button>
@@ -902,7 +911,7 @@ export function WorkflowDetail() {
         </div>
 
         {/* React Flow canvas */}
-        <div className="flex-1 min-w-0">
+        <div className="flex-1 min-w-0" style={{ background: "#1e2535" }}>
           <ReactFlow
             nodes={rfNodes}
             edges={rfEdges}
@@ -915,17 +924,25 @@ export function WorkflowDetail() {
             fitView
             fitViewOptions={{ padding: 0.2 }}
             deleteKeyCode={null}
+            defaultEdgeOptions={{
+              style: {
+                strokeDasharray: "4 3",
+                stroke: "oklch(0.82 0.18 85)",
+                strokeWidth: 1,
+              },
+            }}
           >
-            <Background />
+            <Background color="oklch(0.25 0.01 250)" gap={20} />
             <Controls />
             <MiniMap
+              style={{ background: "oklch(0.14 0.01 250)", border: "1px solid oklch(0.25 0.01 250)" }}
               nodeColor={(n) => {
                 const t = n.type ?? "";
-                if (t === "entry") return "#bfdbfe";
-                if (t === "send") return "#bbf7d0";
-                if (t === "wait") return "#fef08a";
-                if (t === "branch") return "#fbcfe8";
-                return "#e5e7eb";
+                if (t === "entry") return "oklch(0.72 0.17 155)";
+                if (t === "send") return "oklch(0.82 0.18 85)";
+                if (t === "wait") return "oklch(0.78 0.18 75)";
+                if (t === "branch") return "oklch(0.70 0.18 290)";
+                return "oklch(0.62 0.25 25)";
               }}
             />
           </ReactFlow>
@@ -933,7 +950,7 @@ export function WorkflowDetail() {
 
         {/* Right property panel */}
         <div className="w-72 border-l border-border bg-card overflow-y-auto flex-shrink-0">
-          <div className="text-xs font-medium text-muted-foreground px-4 py-2 border-b border-border">
+          <div className="text-[0.65rem] font-mono uppercase tracking-[0.15em] text-muted-foreground px-4 py-2 border-b border-border">
             Properties
           </div>
           {isReadOnly ? (

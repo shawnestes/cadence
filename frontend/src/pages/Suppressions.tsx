@@ -79,7 +79,13 @@ export function Suppressions() {
 
   return (
     <div className="space-y-6">
-      <h2 className="text-2xl font-semibold">Suppressions</h2>
+      {/* Masthead */}
+      <div className="border-b border-border pb-4">
+        <h1 className="text-2xl font-semibold tracking-tight">Suppressions</h1>
+        <p className="mt-1 text-xs font-mono text-muted-foreground uppercase tracking-[0.1em]">
+          Global suppression list — checked at send time
+        </p>
+      </div>
 
       <form
         className="flex gap-2"
@@ -111,7 +117,7 @@ export function Suppressions() {
       </form>
 
       <form
-        className="flex flex-wrap gap-2 items-end rounded-lg border border-border p-4"
+        className="flex flex-wrap gap-2 items-end border border-border p-4 rounded"
         onSubmit={(e) => {
           e.preventDefault();
           if (!newEmail.trim()) return;
@@ -124,8 +130,8 @@ export function Suppressions() {
           });
         }}
       >
-        <div className="flex-1 min-w-[200px]">
-          <label className="text-xs text-muted-foreground">Email</label>
+        <div className="flex-1 min-w-[200px] space-y-1">
+          <label className="text-[0.65rem] font-mono uppercase tracking-[0.12em] text-muted-foreground">Email</label>
           <Input
             placeholder="user@example.com"
             value={newEmail}
@@ -133,14 +139,14 @@ export function Suppressions() {
             required
           />
         </div>
-        <div>
-          <label className="text-xs text-muted-foreground">Reason</label>
+        <div className="space-y-1">
+          <label className="text-[0.65rem] font-mono uppercase tracking-[0.12em] text-muted-foreground">Reason</label>
           <select
             value={newReason}
             onChange={(e) =>
               setNewReason(e.target.value as SuppressionReason)
             }
-            className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+            className="h-9 w-full rounded border border-input bg-background px-3 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-ring"
           >
             {REASONS.map((r) => (
               <option key={r} value={r}>
@@ -149,8 +155,8 @@ export function Suppressions() {
             ))}
           </select>
         </div>
-        <div className="flex-1 min-w-[160px]">
-          <label className="text-xs text-muted-foreground">Source</label>
+        <div className="flex-1 min-w-[160px] space-y-1">
+          <label className="text-[0.65rem] font-mono uppercase tracking-[0.12em] text-muted-foreground">Source</label>
           <Input
             placeholder="manual_ui"
             value={newSource}
@@ -162,14 +168,14 @@ export function Suppressions() {
         </Button>
       </form>
       {createMut.error && (
-        <div className="text-sm text-destructive">
+        <div className="text-sm font-mono text-danger">
           {(createMut.error as Error).message}
         </div>
       )}
 
-      {isLoading && <div>Loading...</div>}
+      {isLoading && <div className="text-sm font-mono text-muted-foreground">Loading...</div>}
       {error && (
-        <div className="text-destructive">{(error as Error).message}</div>
+        <div className="text-sm font-mono text-danger">{(error as Error).message}</div>
       )}
 
       {!isLoading && !error && (
@@ -180,24 +186,24 @@ export function Suppressions() {
                 <Th>Email</Th>
                 <Th>Reason</Th>
                 <Th>Source</Th>
-                <Th>Suppressed at</Th>
+                <Th>Suppressed At</Th>
                 <Th>Actions</Th>
               </Tr>
             </Thead>
             <Tbody>
               {rows.length === 0 && (
                 <Tr>
-                  <Td colSpan={5} className="text-muted-foreground">
+                  <Td colSpan={5} className="text-muted-foreground font-mono text-xs">
                     No suppressions.
                   </Td>
                 </Tr>
               )}
               {rows.map((s) => (
                 <Tr key={s.id}>
-                  <Td className="font-mono text-xs">{s.email}</Td>
-                  <Td>{s.reason}</Td>
-                  <Td>{s.source}</Td>
-                  <Td>{formatDate(s.suppressed_at)}</Td>
+                  <Td className="font-mono text-xs tabular-nums">{s.email}</Td>
+                  <Td className="font-mono text-xs">{s.reason}</Td>
+                  <Td className="font-mono text-xs">{s.source}</Td>
+                  <Td className="font-mono text-xs tabular-nums">{formatDate(s.suppressed_at)}</Td>
                   <Td>
                     <Button
                       variant="destructive"
@@ -217,8 +223,8 @@ export function Suppressions() {
             </Tbody>
           </Table>
 
-          <div className="flex items-center justify-between text-sm">
-            <span className="text-muted-foreground">
+          <div className="flex items-center justify-between text-xs font-mono text-muted-foreground">
+            <span>
               {total} total &middot; page {page + 1}
             </span>
             <div className="flex gap-2">

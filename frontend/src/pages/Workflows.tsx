@@ -94,8 +94,14 @@ export function Workflows() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h2 className="text-2xl font-semibold">Workflows</h2>
+      {/* Masthead */}
+      <div className="border-b border-border pb-4 flex items-end justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Workflows</h1>
+          <p className="mt-1 text-xs font-mono text-muted-foreground uppercase tracking-[0.1em]">
+            Journey definitions & automation sequences
+          </p>
+        </div>
         <Button onClick={() => setShowForm((s) => !s)}>
           {showForm ? "Cancel" : "New Workflow"}
         </Button>
@@ -103,7 +109,7 @@ export function Workflows() {
 
       <div className="flex flex-wrap items-center gap-3">
         <div className="flex items-center gap-2">
-          <label className="text-sm text-muted-foreground">Status</label>
+          <label className="text-xs font-mono uppercase tracking-[0.1em] text-muted-foreground">Status</label>
           <Select
             options={STATUS_OPTIONS}
             value={status}
@@ -114,7 +120,7 @@ export function Workflows() {
           />
         </div>
         <div className="flex items-center gap-2">
-          <label className="text-sm text-muted-foreground">Vertical</label>
+          <label className="text-xs font-mono uppercase tracking-[0.1em] text-muted-foreground">Vertical</label>
           <Select
             options={VERTICAL_OPTIONS_FILTER}
             value={vertical}
@@ -129,10 +135,10 @@ export function Workflows() {
       {showForm && (
         <form
           onSubmit={onCreate}
-          className="space-y-3 rounded-lg border border-border bg-card p-4"
+          className="space-y-3 border border-border bg-card p-4 rounded"
         >
           <div className="space-y-1">
-            <label className="text-sm font-medium">Name</label>
+            <label className="text-xs font-mono uppercase tracking-[0.1em] text-muted-foreground">Name</label>
             <Input
               value={newName}
               onChange={(e) => setNewName(e.target.value)}
@@ -141,7 +147,7 @@ export function Workflows() {
             />
           </div>
           <div className="space-y-1">
-            <label className="text-sm font-medium">Vertical</label>
+            <label className="text-xs font-mono uppercase tracking-[0.1em] text-muted-foreground">Vertical</label>
             <Select
               options={VERTICAL_OPTIONS}
               value={newVertical}
@@ -153,7 +159,7 @@ export function Workflows() {
               {createMut.isPending ? "Creating..." : "Create"}
             </Button>
             {createMut.error && (
-              <span className="text-sm text-destructive">
+              <span className="text-sm font-mono text-danger">
                 {(createMut.error as Error).message}
               </span>
             )}
@@ -161,9 +167,9 @@ export function Workflows() {
         </form>
       )}
 
-      {isLoading && <div>Loading...</div>}
+      {isLoading && <div className="text-sm font-mono text-muted-foreground">Loading...</div>}
       {error && (
-        <div className="text-destructive">{(error as Error).message}</div>
+        <div className="text-sm font-mono text-danger">{(error as Error).message}</div>
       )}
 
       {!isLoading && !error && (
@@ -182,7 +188,7 @@ export function Workflows() {
             <Tbody>
               {rows.length === 0 && (
                 <Tr>
-                  <Td colSpan={6} className="text-center text-muted-foreground">
+                  <Td colSpan={6} className="text-center font-mono text-xs text-muted-foreground">
                     No workflows
                   </Td>
                 </Tr>
@@ -190,16 +196,16 @@ export function Workflows() {
               {rows.map((wf) => (
                 <Tr key={wf.id}>
                   <Td className="font-medium">{wf.name}</Td>
-                  <Td>{wf.vertical}</Td>
+                  <Td className="font-mono text-xs">{wf.vertical}</Td>
                   <Td>
                     <Badge variant={statusVariant(wf.status)}>{wf.status}</Badge>
                   </Td>
-                  <Td>v{wf.version}</Td>
-                  <Td>{formatDate(wf.updated_at)}</Td>
+                  <Td className="font-mono text-xs tabular-nums">v{wf.version}</Td>
+                  <Td className="font-mono text-xs tabular-nums">{formatDate(wf.updated_at)}</Td>
                   <Td>
                     <Link
                       to={`/workflows/${wf.id}`}
-                      className="text-primary hover:underline"
+                      className="text-xs font-mono text-primary hover:underline underline-offset-4"
                     >
                       Open
                     </Link>
@@ -209,9 +215,9 @@ export function Workflows() {
             </Tbody>
           </Table>
 
-          <div className="flex items-center justify-between text-sm text-muted-foreground">
+          <div className="flex items-center justify-between text-xs font-mono text-muted-foreground">
             <span>
-              {total} total · page {page + 1}
+              {total} total &middot; page {page + 1}
             </span>
             <div className="flex gap-2">
               <Button

@@ -17,7 +17,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/Card";
-import { Badge } from "@/components/ui/Badge";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -61,15 +60,15 @@ function WindowToggle({
   onChange: (w: StatsWindow) => void;
 }) {
   return (
-    <div className="inline-flex rounded-md border border-border bg-muted p-0.5 gap-0.5">
+    <div className="inline-flex border border-border p-0.5 gap-0.5">
       {WINDOWS.map((w) => (
         <button
           key={w}
           onClick={() => onChange(w)}
           className={[
-            "rounded px-3 py-1 text-sm font-medium transition-colors",
+            "px-3 py-1 text-xs font-mono uppercase tracking-[0.1em] transition-colors",
             value === w
-              ? "bg-background text-foreground shadow-sm"
+              ? "bg-primary text-primary-foreground"
               : "text-muted-foreground hover:text-foreground",
           ].join(" ")}
         >
@@ -81,7 +80,7 @@ function WindowToggle({
 }
 
 // ---------------------------------------------------------------------------
-// Stat card
+// Stat card — chrome-free, big number signature
 // ---------------------------------------------------------------------------
 
 type StatCardProps = {
@@ -93,35 +92,45 @@ type StatCardProps = {
 };
 
 function StatCard({ title, value, sub, alert, warn }: StatCardProps) {
-  const borderCls = alert
-    ? "border-destructive"
+  const valueColor = alert
+    ? "text-danger"
     : warn
-      ? "border-yellow-400"
-      : "";
+      ? "text-warn"
+      : "text-foreground";
+
   return (
-    <Card className={borderCls}>
-      <CardHeader className="pb-2">
-        <CardTitle className="text-sm font-medium text-muted-foreground">
-          {title}
-        </CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div className="flex items-end gap-2">
-          <span
-            className={[
-              "text-2xl font-bold tabular-nums",
-              alert ? "text-destructive" : warn ? "text-yellow-600" : "",
-            ].join(" ")}
-          >
-            {value}
-          </span>
-          {alert && <AlertTriangle className="h-4 w-4 text-destructive mb-1" />}
-        </div>
-        {sub && (
-          <p className="mt-1 text-xs text-muted-foreground">{sub}</p>
-        )}
-      </CardContent>
-    </Card>
+    <div className="flex flex-col gap-1">
+      <div className="text-[0.7rem] uppercase tracking-[0.15em] text-muted-foreground font-medium font-mono">
+        {title}
+        {alert && <AlertTriangle className="inline h-3 w-3 ml-1.5 text-danger" />}
+      </div>
+      <div className={`text-5xl font-bold font-mono tabular-nums leading-none ${valueColor}`}>
+        {value}
+      </div>
+      {sub && (
+        <div className="text-xs text-muted-foreground font-mono">{sub}</div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Full-width alert banner for complaint rate violations
+// ---------------------------------------------------------------------------
+
+function ComplaintAlertBanner({ rate }: { rate: number }) {
+  return (
+    <div className="border border-[oklch(0.62_0.25_25_/_0.5)] bg-[oklch(0.62_0.25_25_/_0.1)] px-4 py-3 flex items-center gap-3">
+      <AlertTriangle className="h-4 w-4 text-danger flex-shrink-0" />
+      <div>
+        <span className="text-sm font-mono font-medium text-danger uppercase tracking-[0.1em]">
+          Complaint Rate Critical
+        </span>
+        <span className="text-sm text-danger ml-2">
+          {pct(rate)} — exceeds 0.1% SES action threshold
+        </span>
+      </div>
+    </div>
   );
 }
 
@@ -151,7 +160,7 @@ function BarChart({ points, bucket, valueKey, label, color = "bg-primary" }: Bar
 
   return (
     <div>
-      <p className="mb-2 text-xs font-medium text-muted-foreground uppercase tracking-wide">
+      <p className="mb-2 text-[0.7rem] font-mono font-medium text-muted-foreground uppercase tracking-[0.15em]">
         {label}
       </p>
       <div className="flex items-end gap-[2px] h-32">
@@ -164,20 +173,18 @@ function BarChart({ points, bucket, valueKey, label, color = "bg-primary" }: Bar
               title={`${formatBucketLabel(p.bucket_start, bucket)}: ${fmt(values[i])}`}
             >
               <div
-                className={`w-full rounded-t ${color} transition-all`}
+                className={`w-full ${color} transition-all opacity-80`}
                 style={{ height: `${h}%` }}
               />
-              {/* tooltip */}
-              <span className="pointer-events-none absolute bottom-full mb-1 hidden group-hover:block whitespace-nowrap rounded bg-popover px-1.5 py-0.5 text-xs shadow border border-border text-popover-foreground">
+              <span className="pointer-events-none absolute bottom-full mb-1 hidden group-hover:block whitespace-nowrap rounded border border-border bg-popover px-1.5 py-0.5 text-xs font-mono text-popover-foreground">
                 {formatBucketLabel(p.bucket_start, bucket)}: {fmt(values[i])}
               </span>
             </div>
           );
         })}
       </div>
-      {/* x-axis labels — show first, middle, last only to avoid crowding */}
       {points.length > 0 && (
-        <div className="mt-1 flex justify-between text-[10px] text-muted-foreground">
+        <div className="mt-1 flex justify-between text-[10px] font-mono text-muted-foreground">
           <span>{formatBucketLabel(points[0].bucket_start, bucket)}</span>
           {points.length > 2 && (
             <span>
@@ -203,15 +210,11 @@ function BarChart({ points, bucket, valueKey, label, color = "bg-primary" }: Bar
 type RateLineChartProps = {
   points: TimeseriesPoint[];
   bucket: StatsBucket;
-  /** numerator key */
   numKey: keyof TimeseriesPoint;
-  /** denominator key */
   denKey: keyof TimeseriesPoint;
   label: string;
-  /** 0–1 threshold to draw a horizontal reference line */
   threshold?: number;
   thresholdLabel?: string;
-  /** CSS color value (hex, hsl, named) used for the bars */
   fillColor?: string;
 };
 
@@ -223,9 +226,9 @@ function RateLineChart({
   label,
   threshold,
   thresholdLabel,
-  fillColor = "#fb923c", // orange-400
+  fillColor = "oklch(0.82 0.18 85)",
 }: RateLineChartProps) {
-  const CHART_H = 128; // px — matches h-32
+  const CHART_H = 128;
 
   if (points.length === 0) {
     return (
@@ -241,19 +244,15 @@ function RateLineChart({
     return d > 0 ? n / d : 0;
   });
 
-  // Use a ceiling that is the greater of max rate or 2× threshold (so the threshold line is
-  // always visible and not at the top of the chart).
   const maxRate = Math.max(...rates, threshold ? threshold * 2 : 0.01);
-
-  // Map rate → SVG y coordinate (0 = top, CHART_H = bottom)
   const toY = (r: number) => CHART_H - (r / maxRate) * CHART_H;
 
-  const W = 400; // viewBox width
+  const W = 400;
   const barW = W / Math.max(points.length, 1);
 
   return (
     <div>
-      <p className="mb-2 text-xs font-medium text-muted-foreground uppercase tracking-wide">
+      <p className="mb-2 text-[0.7rem] font-mono font-medium text-muted-foreground uppercase tracking-[0.15em]">
         {label}
       </p>
       <div className="relative w-full overflow-hidden" style={{ height: CHART_H }}>
@@ -262,7 +261,6 @@ function RateLineChart({
           preserveAspectRatio="none"
           className="w-full h-full"
         >
-          {/* threshold reference line */}
           {threshold !== undefined && (
             <line
               x1={0}
@@ -271,10 +269,9 @@ function RateLineChart({
               y2={toY(threshold)}
               strokeDasharray="4 3"
               strokeWidth={1.5}
-              className={`stroke-destructive`}
+              stroke="oklch(0.62 0.25 25)"
             />
           )}
-          {/* bars */}
           {points.map((_, i) => {
             const y = toY(rates[i]);
             const barH = CHART_H - y;
@@ -292,9 +289,8 @@ function RateLineChart({
           })}
         </svg>
       </div>
-      {/* x-axis */}
       {points.length > 0 && (
-        <div className="mt-1 flex justify-between text-[10px] text-muted-foreground">
+        <div className="mt-1 flex justify-between text-[10px] font-mono text-muted-foreground">
           <span>{formatBucketLabel(points[0].bucket_start, bucket)}</span>
           {points.length > 2 && (
             <span>
@@ -310,7 +306,7 @@ function RateLineChart({
         </div>
       )}
       {threshold !== undefined && thresholdLabel && (
-        <p className="mt-1 text-[10px] text-destructive">
+        <p className="mt-1 text-[10px] font-mono text-danger">
           — {thresholdLabel} ({pct(threshold)} SES threshold)
         </p>
       )}
@@ -327,7 +323,7 @@ type SseStatus = "connecting" | "live" | "error";
 function SseIndicator({ status }: { status: SseStatus }) {
   if (status === "live") {
     return (
-      <span className="flex items-center gap-1 text-xs text-green-600">
+      <span className="flex items-center gap-1 text-xs font-mono text-success">
         <Wifi className="h-3 w-3" />
         Live
       </span>
@@ -335,16 +331,16 @@ function SseIndicator({ status }: { status: SseStatus }) {
   }
   if (status === "error") {
     return (
-      <span className="flex items-center gap-1 text-xs text-yellow-600">
+      <span className="flex items-center gap-1 text-xs font-mono text-warn">
         <WifiOff className="h-3 w-3" />
-        Reconnecting…
+        Reconnecting
       </span>
     );
   }
   return (
-    <span className="flex items-center gap-1 text-xs text-muted-foreground">
+    <span className="flex items-center gap-1 text-xs font-mono text-muted-foreground">
       <Wifi className="h-3 w-3 animate-pulse" />
-      Connecting…
+      Connecting
     </span>
   );
 }
@@ -361,7 +357,6 @@ export function Dashboard() {
   const [sseStatus, setSseStatus] = useState<SseStatus>("connecting");
   const esRef = useRef<EventSource | null>(null);
 
-  // ------ Topline query (used as initial/fallback) ------
   const {
     data: toplineData,
     isLoading: toplineLoading,
@@ -371,7 +366,6 @@ export function Dashboard() {
     queryFn: () => getTopline(statsWindow, TENANT),
   });
 
-  // ------ Timeseries query ------
   const bucket = bucketForWindow(statsWindow);
   const {
     data: timeseriesData,
@@ -382,9 +376,7 @@ export function Dashboard() {
     queryFn: () => getTimeseries(statsWindow, bucket, TENANT),
   });
 
-  // ------ SSE live updates ------
   useEffect(() => {
-    // Close any existing connection
     esRef.current?.close();
     setSseStatus("connecting");
     setLiveTopline(null);
@@ -408,7 +400,6 @@ export function Dashboard() {
 
     es.onerror = () => {
       setSseStatus("error");
-      // Browser will auto-retry; we just update the indicator.
     };
 
     return () => {
@@ -417,45 +408,47 @@ export function Dashboard() {
     };
   }, [statsWindow]);
 
-  // Prefer live data from SSE when available; fall back to query result.
   const topline: Topline | null =
     liveTopline ?? toplineData?.topline ?? null;
 
   const points: TimeseriesPoint[] = timeseriesData?.points ?? [];
 
-  // ---------------------------------------------------------------------------
-  // Render
-  // ---------------------------------------------------------------------------
-
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 className="text-2xl font-semibold">Deliverability Dashboard</h2>
-          <p className="mt-0.5 text-sm text-muted-foreground">
-            Tenant: <span className="font-medium">{TENANT}</span>
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          <SseIndicator status={sseStatus} />
-          <WindowToggle value={statsWindow} onChange={setStatsWindow} />
+      {/* Page masthead */}
+      <div className="border-b border-border pb-4">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight">Deliverability Dashboard</h1>
+            <p className="mt-1 text-xs font-mono text-muted-foreground uppercase tracking-[0.1em]">
+              Tenant: {TENANT}
+            </p>
+          </div>
+          <div className="flex items-center gap-4">
+            <SseIndicator status={sseStatus} />
+            <WindowToggle value={statsWindow} onChange={setStatsWindow} />
+          </div>
         </div>
       </div>
 
-      {/* Loading / error states for topline */}
+      {/* Complaint rate full-width alert banner */}
+      {topline && topline.complaint_rate >= 0.001 && (
+        <ComplaintAlertBanner rate={topline.complaint_rate} />
+      )}
+
+      {/* Loading / error states */}
       {toplineLoading && !topline && (
-        <p className="text-sm text-muted-foreground">Loading…</p>
+        <p className="text-sm font-mono text-muted-foreground">Loading...</p>
       )}
       {toplineError && (
-        <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
+        <div className="border border-[oklch(0.62_0.25_25_/_0.4)] bg-[oklch(0.62_0.25_25_/_0.1)] px-4 py-3 text-sm font-mono text-danger">
           Failed to load metrics: {(toplineError as Error).message}
         </div>
       )}
 
-      {/* ---- Topline stat cards ---- */}
+      {/* ---- Topline stat cards — chrome-free grid ---- */}
       {topline && (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid gap-x-8 gap-y-8 sm:grid-cols-2 lg:grid-cols-4">
           <StatCard
             title="Sends"
             value={fmt(topline.sends)}
@@ -467,19 +460,19 @@ export function Dashboard() {
             sub={`${fmt(topline.delivered)} / ${fmt(topline.sends)}`}
           />
           <StatCard
-            title="Open Rate (unique)"
+            title="Open Rate"
             value={pct(topline.open_rate)}
             sub={`${fmt(topline.unique_opens)} unique opens`}
           />
           <StatCard
-            title="Click Rate (unique)"
+            title="Click Rate"
             value={pct(topline.click_rate)}
             sub={`${fmt(topline.unique_clicks)} unique clicks`}
           />
           <StatCard
             title="Bounce Rate"
             value={pct(topline.bounce_rate)}
-            sub={`${fmt(topline.bounces)} bounces (total — hard/soft split not yet exposed)`}
+            sub={`${fmt(topline.bounces)} bounces`}
             warn={topline.bounce_rate > 0.03}
             alert={topline.bounce_rate >= 0.05}
           />
@@ -495,20 +488,11 @@ export function Dashboard() {
             value={pct(topline.unsubscribe_rate)}
             sub={`${fmt(topline.unsubscribes)} unsubscribes`}
           />
-          {/* Complaint rate badge if over threshold */}
-          {topline.complaint_rate >= 0.001 && (
-            <div className="sm:col-span-2 lg:col-span-1 flex items-center">
-              <Badge variant="destructive" className="text-sm px-3 py-1">
-                Complaint rate exceeds 0.1% — SES action risk
-              </Badge>
-            </div>
-          )}
         </div>
       )}
 
       {/* ---- Charts ---- */}
-      <div className="grid gap-6 lg:grid-cols-2">
-        {/* Sends over time */}
+      <div className="grid gap-4 lg:grid-cols-2">
         <Card>
           <CardHeader>
             <CardTitle>Sends Over Time</CardTitle>
@@ -516,10 +500,10 @@ export function Dashboard() {
           <CardContent>
             {tsLoading ? (
               <div className="flex h-32 items-center justify-center text-sm text-muted-foreground">
-                Loading…
+                Loading...
               </div>
             ) : tsError ? (
-              <div className="text-sm text-destructive">
+              <div className="text-sm text-danger">
                 {(tsError as Error).message}
               </div>
             ) : (
@@ -534,18 +518,17 @@ export function Dashboard() {
           </CardContent>
         </Card>
 
-        {/* Bounce + complaint rates over time */}
         <Card>
           <CardHeader>
-            <CardTitle>Bounce & Complaint Rates Over Time</CardTitle>
+            <CardTitle>Bounce & Complaint Rates</CardTitle>
           </CardHeader>
           <CardContent className="space-y-6">
             {tsLoading ? (
               <div className="flex h-32 items-center justify-center text-sm text-muted-foreground">
-                Loading…
+                Loading...
               </div>
             ) : tsError ? (
-              <div className="text-sm text-destructive">
+              <div className="text-sm text-danger">
                 {(tsError as Error).message}
               </div>
             ) : (
@@ -558,7 +541,7 @@ export function Dashboard() {
                   label="Bounce Rate"
                   threshold={0.05}
                   thresholdLabel="SES bounce threshold"
-                  fillColor="#fb923c"
+                  fillColor="oklch(0.78 0.18 75)"
                 />
                 <RateLineChart
                   points={points}
@@ -568,49 +551,36 @@ export function Dashboard() {
                   label="Complaint Rate"
                   threshold={0.001}
                   thresholdLabel="SES complaint threshold"
-                  fillColor="#f43f5e"
+                  fillColor="oklch(0.62 0.25 25)"
                 />
               </>
             )}
           </CardContent>
         </Card>
 
-        {/* Top campaigns by volume — endpoint not yet available */}
         <Card>
           <CardHeader>
             <CardTitle>Top 10 Campaigns by Volume</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="flex h-32 flex-col items-center justify-center gap-2 text-center text-sm text-muted-foreground">
-              <span className="text-2xl">📊</span>
-              <span>Coming soon</span>
-              <span className="text-xs">
-                {/* TODO: wire GET /api/stats/campaigns-volume once backend endpoint exists */}
+            <div className="flex h-32 flex-col items-center justify-center gap-2 text-center">
+              <span className="text-[0.65rem] font-mono uppercase tracking-[0.15em] text-muted-foreground">Coming Soon</span>
+              <span className="text-xs text-muted-foreground max-w-xs">
                 No backend endpoint for per-campaign volume yet.
               </span>
             </div>
           </CardContent>
         </Card>
 
-        {/* SES reputation panel */}
         <Card>
           <CardHeader>
             <CardTitle>SES Reputation & Account Status</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="flex h-32 flex-col items-center justify-center gap-2 text-center text-sm text-muted-foreground">
-              <span className="text-2xl">🛡️</span>
-              <span className="font-medium text-foreground">Not yet wired</span>
-              <span className="text-xs max-w-xs">
-                {/*
-                  TODO: expose GET /api/stats/ses-reputation (boto3
-                  ses.get_account → SendingEnabled, SendingQuota,
-                  ses.get_account_sending_enabled, Reputations via
-                  SES Mailbox Simulator or SES Account Management API).
-                  No data is fabricated here per spec constraint.
-                */}
-                Requires a backend endpoint that proxies
-                SES account reputation data. No fake data shown.
+            <div className="flex h-32 flex-col items-center justify-center gap-2 text-center">
+              <span className="text-[0.65rem] font-mono uppercase tracking-[0.15em] text-muted-foreground">Not Wired</span>
+              <span className="text-xs text-muted-foreground max-w-xs">
+                Requires a backend endpoint that proxies SES account reputation data. No fake data shown.
               </span>
             </div>
           </CardContent>

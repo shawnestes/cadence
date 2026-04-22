@@ -88,15 +88,21 @@ export function Campaigns() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h2 className="text-2xl font-semibold">Campaigns</h2>
+      {/* Masthead */}
+      <div className="border-b border-border pb-4 flex items-end justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Campaigns</h1>
+          <p className="mt-1 text-xs font-mono text-muted-foreground uppercase tracking-[0.1em]">
+            Email campaigns & variant management
+          </p>
+        </div>
         <Button onClick={() => setShowForm((s) => !s)}>
           {showForm ? "Cancel" : "New Campaign"}
         </Button>
       </div>
 
       <div className="flex items-center gap-2">
-        <label className="text-sm text-muted-foreground">Status</label>
+        <label className="text-xs font-mono uppercase tracking-[0.1em] text-muted-foreground">Status</label>
         <Select
           options={STATUS_OPTIONS}
           value={status}
@@ -110,10 +116,10 @@ export function Campaigns() {
       {showForm && (
         <form
           onSubmit={onCreate}
-          className="space-y-3 rounded-lg border border-border bg-card p-4"
+          className="space-y-3 border border-border bg-card p-4 rounded"
         >
           <div className="space-y-1">
-            <label className="text-sm font-medium">Name</label>
+            <label className="text-xs font-mono uppercase tracking-[0.1em] text-muted-foreground">Name</label>
             <Input
               value={name}
               onChange={(e) => setName(e.target.value)}
@@ -122,7 +128,7 @@ export function Campaigns() {
             />
           </div>
           <div className="space-y-1">
-            <label className="text-sm font-medium">Vertical</label>
+            <label className="text-xs font-mono uppercase tracking-[0.1em] text-muted-foreground">Vertical</label>
             <Select
               options={VERTICAL_OPTIONS}
               value={vertical}
@@ -130,7 +136,7 @@ export function Campaigns() {
             />
           </div>
           <div className="space-y-1">
-            <label className="text-sm font-medium">AI brief</label>
+            <label className="text-xs font-mono uppercase tracking-[0.1em] text-muted-foreground">AI Brief</label>
             <Textarea
               value={aiBrief}
               onChange={(e) => setAiBrief(e.target.value)}
@@ -142,7 +148,7 @@ export function Campaigns() {
               {createMut.isPending ? "Creating..." : "Create"}
             </Button>
             {createMut.error && (
-              <span className="text-sm text-destructive">
+              <span className="text-sm font-mono text-danger">
                 {(createMut.error as Error).message}
               </span>
             )}
@@ -150,9 +156,9 @@ export function Campaigns() {
         </form>
       )}
 
-      {isLoading && <div>Loading...</div>}
+      {isLoading && <div className="text-sm font-mono text-muted-foreground">Loading...</div>}
       {error && (
-        <div className="text-destructive">{(error as Error).message}</div>
+        <div className="text-sm font-mono text-danger">{(error as Error).message}</div>
       )}
 
       {!isLoading && !error && (
@@ -170,7 +176,7 @@ export function Campaigns() {
             <Tbody>
               {rows.length === 0 && (
                 <Tr>
-                  <Td colSpan={5} className="text-center text-muted-foreground">
+                  <Td colSpan={5} className="text-center text-muted-foreground font-mono text-xs">
                     No campaigns
                   </Td>
                 </Tr>
@@ -178,15 +184,15 @@ export function Campaigns() {
               {rows.map((c) => (
                 <Tr key={c.id}>
                   <Td className="font-medium">{c.name}</Td>
-                  <Td>{c.vertical}</Td>
+                  <Td className="font-mono text-xs">{c.vertical}</Td>
                   <Td>
                     <Badge variant={statusVariant(c.status)}>{c.status}</Badge>
                   </Td>
-                  <Td>{formatDate(c.created_at)}</Td>
+                  <Td className="font-mono text-xs tabular-nums">{formatDate(c.created_at)}</Td>
                   <Td>
                     <Link
                       to={`/campaigns/${c.id}`}
-                      className="text-primary hover:underline"
+                      className="text-xs font-mono text-primary hover:underline underline-offset-4"
                     >
                       Open
                     </Link>
@@ -196,9 +202,9 @@ export function Campaigns() {
             </Tbody>
           </Table>
 
-          <div className="flex items-center justify-between text-sm text-muted-foreground">
+          <div className="flex items-center justify-between text-xs font-mono text-muted-foreground">
             <span>
-              {total} total · page {page + 1}
+              {total} total &middot; page {page + 1}
             </span>
             <div className="flex gap-2">
               <Button

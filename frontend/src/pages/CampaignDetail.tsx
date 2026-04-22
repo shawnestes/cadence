@@ -53,7 +53,7 @@ function prettyJson(v: unknown): string {
 
 function truncate(s: string, n = 60): string {
   if (!s) return "";
-  return s.length > n ? `${s.slice(0, n)}…` : s;
+  return s.length > n ? `${s.slice(0, n)}...` : s;
 }
 
 function parseEmails(raw: string): string[] {
@@ -130,10 +130,10 @@ export function CampaignDetail() {
   });
 
   if (!id) return <div>Missing campaign id</div>;
-  if (campaignQuery.isLoading) return <div>Loading...</div>;
+  if (campaignQuery.isLoading) return <div className="text-sm font-mono text-muted-foreground">Loading...</div>;
   if (campaignQuery.error) {
     return (
-      <div className="text-destructive">
+      <div className="text-sm font-mono text-danger">
         {(campaignQuery.error as Error).message}
       </div>
     );
@@ -152,14 +152,15 @@ export function CampaignDetail() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-3">
-        <Link to="/campaigns" className="text-sm text-muted-foreground hover:underline">
-          ← Campaigns
+      {/* Masthead */}
+      <div className="border-b border-border pb-4">
+        <Link to="/campaigns" className="text-xs font-mono text-muted-foreground hover:text-foreground uppercase tracking-[0.1em]">
+          &larr; Campaigns
         </Link>
-      </div>
-      <div className="flex items-center gap-3">
-        <h2 className="text-2xl font-semibold">{campaign.name}</h2>
-        <Badge variant={statusVariant(campaign.status)}>{campaign.status}</Badge>
+        <div className="mt-2 flex items-center gap-3">
+          <h1 className="text-2xl font-semibold tracking-tight">{campaign.name}</h1>
+          <Badge variant={statusVariant(campaign.status)}>{campaign.status}</Badge>
+        </div>
       </div>
 
       <div className="flex flex-wrap gap-2">
@@ -193,7 +194,7 @@ export function CampaignDetail() {
           </Button>
         )}
         {updateCampaignMut.error && (
-          <span className="text-sm text-destructive">
+          <span className="text-sm font-mono text-danger">
             {(updateCampaignMut.error as Error).message}
           </span>
         )}
@@ -205,28 +206,28 @@ export function CampaignDetail() {
         </CardHeader>
         <CardContent className="space-y-3 text-sm">
           <div>
-            <span className="text-muted-foreground">Vertical: </span>
-            {campaign.vertical}
+            <span className="text-xs font-mono text-muted-foreground uppercase tracking-[0.1em]">Vertical </span>
+            <span className="font-mono">{campaign.vertical}</span>
           </div>
           <div>
-            <span className="text-muted-foreground">Created: </span>
-            {formatDate(campaign.created_at)}
+            <span className="text-xs font-mono text-muted-foreground uppercase tracking-[0.1em]">Created </span>
+            <span className="font-mono tabular-nums">{formatDate(campaign.created_at)}</span>
           </div>
           <div>
-            <div className="text-muted-foreground">AI brief</div>
-            <div className="whitespace-pre-wrap rounded-md bg-muted/40 p-3">
+            <div className="text-xs font-mono text-muted-foreground uppercase tracking-[0.1em] mb-1">AI Brief</div>
+            <div className="whitespace-pre-wrap rounded border border-border bg-surface-2 p-3 text-sm font-mono">
               {campaign.ai_brief || "—"}
             </div>
           </div>
           <div>
-            <div className="text-muted-foreground">MAB config</div>
-            <pre className="overflow-auto rounded-md bg-muted/40 p-3 text-xs">
+            <div className="text-xs font-mono text-muted-foreground uppercase tracking-[0.1em] mb-1">MAB Config</div>
+            <pre className="overflow-auto rounded border border-border bg-surface-2 p-3 text-xs font-mono">
               {prettyJson(campaign.mab_config)}
             </pre>
           </div>
           <div>
-            <div className="text-muted-foreground">Cohort filter</div>
-            <pre className="overflow-auto rounded-md bg-muted/40 p-3 text-xs">
+            <div className="text-xs font-mono text-muted-foreground uppercase tracking-[0.1em] mb-1">Cohort Filter</div>
+            <pre className="overflow-auto rounded border border-border bg-surface-2 p-3 text-xs font-mono">
               {prettyJson(campaign.cohort_filter)}
             </pre>
           </div>
@@ -235,12 +236,12 @@ export function CampaignDetail() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Generate variants</CardTitle>
+          <CardTitle>Generate Variants</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="flex items-end gap-2">
             <div className="space-y-1">
-              <label className="text-sm font-medium">Variants per cohort</label>
+              <label className="text-xs font-mono uppercase tracking-[0.1em] text-muted-foreground">Variants per cohort</label>
               <Input
                 type="number"
                 min={1}
@@ -258,21 +259,21 @@ export function CampaignDetail() {
               onClick={() => generateMut.mutate(variantsPerCohort)}
               disabled={generateMut.isPending}
             >
-              {generateMut.isPending ? "Generating..." : "Generate variants"}
+              {generateMut.isPending ? "Generating..." : "Generate Variants"}
             </Button>
           </div>
           {generateMut.error && (
-            <div className="text-sm text-destructive">
+            <div className="text-sm font-mono text-danger">
               {(generateMut.error as Error).message}
             </div>
           )}
           {generateResult && (
-            <div className="space-y-1 rounded-md bg-muted/40 p-3 text-sm">
-              <div>Cohorts processed: {generateResult.cohorts_processed}</div>
-              <div>Templates created: {generateResult.templates_created}</div>
-              <div>Variants total: {generateResult.variants_total}</div>
+            <div className="space-y-1 rounded border border-border bg-surface-2 p-3 text-sm font-mono">
+              <div className="tabular-nums">Cohorts processed: {generateResult.cohorts_processed}</div>
+              <div className="tabular-nums">Templates created: {generateResult.templates_created}</div>
+              <div className="tabular-nums">Variants total: {generateResult.variants_total}</div>
               {generateResult.errors.length > 0 && (
-                <div className="text-destructive">
+                <div className="text-danger">
                   <div className="font-medium">Errors:</div>
                   <ul className="list-disc pl-5">
                     {generateResult.errors.map((err, i) => (
@@ -292,7 +293,7 @@ export function CampaignDetail() {
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="flex items-center gap-2">
-            <label className="text-sm text-muted-foreground">Status</label>
+            <label className="text-xs font-mono uppercase tracking-[0.1em] text-muted-foreground">Status</label>
             <Select
               options={TEMPLATE_STATUS_OPTIONS}
               value={templateStatus}
@@ -300,9 +301,9 @@ export function CampaignDetail() {
             />
           </div>
 
-          {templatesQuery.isLoading && <div>Loading templates...</div>}
+          {templatesQuery.isLoading && <div className="text-sm font-mono text-muted-foreground">Loading templates...</div>}
           {templatesQuery.error && (
-            <div className="text-destructive">
+            <div className="text-sm font-mono text-danger">
               {(templatesQuery.error as Error).message}
             </div>
           )}
@@ -324,7 +325,7 @@ export function CampaignDetail() {
                   <Tr>
                     <Td
                       colSpan={6}
-                      className="text-center text-muted-foreground"
+                      className="text-center font-mono text-xs text-muted-foreground"
                     >
                       No templates
                     </Td>
@@ -338,15 +339,15 @@ export function CampaignDetail() {
                     });
                   return (
                     <Tr key={t.id}>
-                      <Td className="font-mono text-xs">{t.cohort_key}</Td>
-                      <Td>{t.variant_label}</Td>
+                      <Td className="font-mono text-xs tabular-nums">{t.cohort_key}</Td>
+                      <Td className="font-mono text-xs">{t.variant_label}</Td>
                       <Td>
                         <Badge variant={statusVariant(t.status)}>
                           {t.status}
                         </Badge>
                       </Td>
-                      <Td title={t.subject}>{truncate(t.subject, 50)}</Td>
-                      <Td>{formatDate(t.created_at)}</Td>
+                      <Td className="text-sm" title={t.subject}>{truncate(t.subject, 50)}</Td>
+                      <Td className="font-mono text-xs tabular-nums">{formatDate(t.created_at)}</Td>
                       <Td>
                         <div className="flex flex-wrap gap-1">
                           {t.status !== "approved" && (
@@ -392,7 +393,7 @@ export function CampaignDetail() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Send to email list</CardTitle>
+          <CardTitle>Send to Email List</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
           <Textarea
@@ -412,17 +413,17 @@ export function CampaignDetail() {
             >
               {sendMut.isPending ? "Sending..." : "Send"}
             </Button>
-            <span className="text-sm text-muted-foreground">
+            <span className="text-xs font-mono text-muted-foreground">
               {parseEmails(emailsRaw).length} recipient(s)
             </span>
           </div>
           {sendMut.error && (
-            <div className="text-sm text-destructive">
+            <div className="text-sm font-mono text-danger">
               {(sendMut.error as Error).message}
             </div>
           )}
           {sendResult && (
-            <div className="space-y-1 rounded-md bg-muted/40 p-3 text-sm">
+            <div className="space-y-1 rounded border border-border bg-surface-2 p-3 text-sm font-mono tabular-nums">
               <div>Queued: {sendResult.queued}</div>
               <div>Skipped (no template): {sendResult.skipped_no_template}</div>
               <div>Skipped (not found): {sendResult.skipped_not_found}</div>
