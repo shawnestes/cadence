@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
+import pytest_asyncio
 from sqlalchemy import func, select
 
 from app.core.config import get_settings
 from app.core.db import async_session_factory
+from app.domain.engagement import TIER_COLD, TIER_DORMANT, TIER_ENGAGED
+from app.domain.timezone import next_window_open as _real_next_window_open
 from app.models.campaign import Campaign
 from app.models.recipient import Recipient
 from app.models.send import Send
@@ -21,12 +25,32 @@ from app.workers import send_worker
 _ANCIENT = datetime(2000, 1, 1, tzinfo=timezone.utc)
 
 
+@pytest_asyncio.fixture(autouse=True)
+async def _open_all_hours(monkeypatch):
+    """Default every send to "inside the quiet-hours window" so tests that
+    aren't specifically exercising SPEC_ADDENDUM_002 quiet hours don't flake
+    depending on the real wall-clock time in the recipient's local zone.
+    Quiet-hours tests restore the real implementation via monkeypatch.
+    """
+    monkeypatch.setattr(send_worker, "next_window_open", lambda **kwargs: kwargs["now_utc"])
+    yield
+
+
 async def _read_send(send_id):
     async with async_session_factory() as s:
         return (await s.execute(select(Send).where(Send.id == send_id))).scalar_one_or_none()
 
 
-async def _seed_recipient(db_session, email: str, attrs: dict | None = None):
+async def _seed_recipient(
+    db_session,
+    email: str,
+    attrs: dict | None = None,
+    engagement_tier: str = "engaged",
+):
+    """Seed a recipient. Defaults to 'engaged' tier (24h gap) so pre-existing
+    tests written before the engagement-gap gate landed keep their original
+    intent without every caller having to specify a tier.
+    """
     now = datetime.now(timezone.utc)
     r = Recipient(
         tenant="otto",
@@ -38,6 +62,7 @@ async def _seed_recipient(db_session, email: str, attrs: dict | None = None):
         consent_source="otto_form",
         consent_at=now,
         attributes=attrs or {"first_name": "Sarah"},
+        engagement_tier=engagement_tier,
     )
     db_session.add(r)
     await db_session.commit()
@@ -291,3 +316,185 @@ async def test_run_once_recipient_sent_after_24h(db_session, monkeypatch):
     refreshed = await _read_send(s.id)
     assert refreshed.status == "sent"
     assert refreshed.sent_at is not None
+
+
+# --- Engagement-tier gap (SPEC_ADDENDUM_002 §2.2) ----------------------------
+
+
+async def test_run_once_engaged_tier_sent_after_25h(db_session, monkeypatch):
+    """Engaged tier's gap is 24h (same as the old flat throttle): a send from
+    25h ago is old enough to clear the gate."""
+    _settings_override(monkeypatch, send_daily_quota=10_000_000)
+
+    email = f"test-{uuid.uuid4()}@cadencetests.io"
+    r = await _seed_recipient(db_session, email, engagement_tier=TIER_ENGAGED)
+    c, t = await _seed_campaign_template(db_session)
+    now = datetime.now(timezone.utc)
+    await _seed_prior_sent_send(db_session, c, t, r, sent_at=now - timedelta(hours=25))
+    s = await _seed_queued_send(db_session, c, t, r, queued_at=_ANCIENT)
+
+    result = await send_worker.run_once()
+
+    assert result["sent"] == 1
+    assert result["throttled"] == 0
+
+    refreshed = await _read_send(s.id)
+    assert refreshed.status == "sent"
+
+
+async def test_run_once_cold_tier_gated_before_7_days(db_session, monkeypatch):
+    """Cold tier's gap is 7 days: a send from 3 days ago is still too recent."""
+    _settings_override(monkeypatch, send_daily_quota=10_000_000)
+
+    email = f"test-{uuid.uuid4()}@cadencetests.io"
+    r = await _seed_recipient(db_session, email, engagement_tier=TIER_COLD)
+    c, t = await _seed_campaign_template(db_session)
+    now = datetime.now(timezone.utc)
+    last_sent = now - timedelta(days=3)
+    await _seed_prior_sent_send(db_session, c, t, r, sent_at=last_sent)
+    s = await _seed_queued_send(db_session, c, t, r, queued_at=_ANCIENT)
+
+    result = await send_worker.run_once()
+
+    assert result["throttled"] == 1
+    assert result["sent"] == 0
+
+    refreshed = await _read_send(s.id)
+    assert refreshed.status == "queued"
+    assert refreshed.failure_reason is None
+    assert refreshed.queued_at > now
+    expected = last_sent + send_worker.min_gap_for_tier(TIER_COLD)
+    assert abs((refreshed.queued_at - expected).total_seconds()) < 2
+
+
+async def test_run_once_dormant_tier_skipped_and_requeued_far_out(db_session, monkeypatch):
+    """Dormant rows are pushed far out here, not suppressed — the nightly
+    scorer worker owns suppression for dormant recipients."""
+    _settings_override(monkeypatch, send_daily_quota=10_000_000)
+
+    email = f"test-{uuid.uuid4()}@cadencetests.io"
+    r = await _seed_recipient(db_session, email, engagement_tier=TIER_DORMANT)
+    c, t = await _seed_campaign_template(db_session)
+    now = datetime.now(timezone.utc)
+    s = await _seed_queued_send(db_session, c, t, r, queued_at=_ANCIENT)
+
+    result = await send_worker.run_once()
+
+    assert result["throttled"] == 1
+    assert result["sent"] == 0
+
+    refreshed = await _read_send(s.id)
+    assert refreshed.status == "queued"
+    assert refreshed.failure_reason is None
+    assert refreshed.queued_at > now + timedelta(days=300)
+
+    suppression_hit = await db_session.execute(
+        select(Suppression).where(Suppression.email == email)
+    )
+    assert suppression_hit.first() is None
+
+
+# --- Weekly / monthly frequency caps (SPEC_ADDENDUM_002 §1.1) ---------------
+
+
+async def test_run_once_weekly_cap_requeues(db_session, monkeypatch):
+    _settings_override(
+        monkeypatch, send_daily_quota=10_000_000, frequency_cap_per_week=2
+    )
+
+    email = f"test-{uuid.uuid4()}@cadencetests.io"
+    r = await _seed_recipient(db_session, email)  # default tier "engaged", 24h gap
+    c, t = await _seed_campaign_template(db_session)
+    now = datetime.now(timezone.utc)
+    oldest = now - timedelta(days=3)
+    # Most recent prior send must clear the 24h engagement gap on its own so
+    # this test isolates the weekly-cap gate specifically.
+    await _seed_prior_sent_send(db_session, c, t, r, sent_at=oldest)
+    await _seed_prior_sent_send(db_session, c, t, r, sent_at=now - timedelta(days=2))
+    s = await _seed_queued_send(db_session, c, t, r, queued_at=_ANCIENT)
+
+    result = await send_worker.run_once()
+
+    assert result["weekly_capped"] == 1
+    assert result["sent"] == 0
+    assert result["throttled"] == 0
+
+    refreshed = await _read_send(s.id)
+    assert refreshed.status == "queued"
+    assert refreshed.failure_reason is None
+    assert refreshed.queued_at > now
+    expected = oldest + send_worker.WEEKLY_CAP_WINDOW
+    assert abs((refreshed.queued_at - expected).total_seconds()) < 2
+
+
+async def test_run_once_monthly_cap_requeues(db_session, monkeypatch):
+    _settings_override(
+        monkeypatch, send_daily_quota=10_000_000, frequency_cap_per_month=2
+    )
+
+    email = f"test-{uuid.uuid4()}@cadencetests.io"
+    r = await _seed_recipient(db_session, email)  # default tier "engaged", 24h gap
+    c, t = await _seed_campaign_template(db_session)
+    now = datetime.now(timezone.utc)
+    oldest = now - timedelta(days=15)
+    # Both prior sends fall outside the 7-day weekly window (so the weekly
+    # gate doesn't trip) but inside the 30-day monthly window.
+    await _seed_prior_sent_send(db_session, c, t, r, sent_at=oldest)
+    await _seed_prior_sent_send(db_session, c, t, r, sent_at=now - timedelta(days=10))
+    s = await _seed_queued_send(db_session, c, t, r, queued_at=_ANCIENT)
+
+    result = await send_worker.run_once()
+
+    assert result["monthly_capped"] == 1
+    assert result["sent"] == 0
+    assert result["weekly_capped"] == 0
+    assert result["throttled"] == 0
+
+    refreshed = await _read_send(s.id)
+    assert refreshed.status == "queued"
+    assert refreshed.failure_reason is None
+    assert refreshed.queued_at > now
+    expected = oldest + send_worker.MONTHLY_CAP_WINDOW
+    assert abs((refreshed.queued_at - expected).total_seconds()) < 2
+
+
+# --- Quiet hours (SPEC_ADDENDUM_002 §1.2) ------------------------------------
+
+
+async def test_run_once_quiet_hours_requeues_to_window_open(db_session, monkeypatch):
+    # Restore the real window-math implementation (the autouse fixture stubs
+    # it to "always open" for every other test in this module).
+    monkeypatch.setattr(send_worker, "next_window_open", _real_next_window_open)
+
+    zone = ZoneInfo("America/Los_Angeles")
+    local_now = datetime.now(timezone.utc).astimezone(zone)
+    # Pick a 1-hour window guaranteed to exclude the current local hour, so
+    # the test is deterministic regardless of when it actually runs.
+    if local_now.hour <= 20:
+        start_hour, end_hour = local_now.hour + 2, local_now.hour + 3
+    else:
+        start_hour, end_hour = 0, 1
+
+    _settings_override(
+        monkeypatch,
+        send_daily_quota=10_000_000,
+        send_window_start_hour=start_hour,
+        send_window_end_hour=end_hour,
+    )
+
+    email = f"test-{uuid.uuid4()}@cadencetests.io"
+    r = await _seed_recipient(db_session, email, attrs={"state": "CA"})
+    c, t = await _seed_campaign_template(db_session)
+    s = await _seed_queued_send(db_session, c, t, r, queued_at=_ANCIENT)
+
+    result = await send_worker.run_once()
+
+    assert result["quiet_hours_skipped"] == 1
+    assert result["sent"] == 0
+
+    refreshed = await _read_send(s.id)
+    assert refreshed.status == "queued"
+    assert refreshed.failure_reason is None
+    assert refreshed.queued_at > datetime.now(timezone.utc)
+    local_retry = refreshed.queued_at.astimezone(zone)
+    assert local_retry.hour == start_hour
