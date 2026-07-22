@@ -163,6 +163,8 @@ recipients (
   consent_at      timestamptz NOT NULL,
   attributes      jsonb NOT NULL DEFAULT '{}',  -- See §5 for schema
   status          text NOT NULL DEFAULT 'active', -- active|suppressed|bounced_hard|complained
+  engagement_tier text NOT NULL DEFAULT 'neutral', -- engaged|neutral|cold|dormant (addendum 002)
+  tier_computed_at timestamptz,
   created_at      timestamptz NOT NULL,
   updated_at      timestamptz NOT NULL,
   UNIQUE (tenant, email)
@@ -417,6 +419,11 @@ Custom Jinja filters live in `domain/personalization.py`:
 ---
 
 ## 6. Workflow Engine
+
+> `entry_segment` uses Segment DSL v2 (SPEC_ADDENDUM_002.md §3.1): `all`/`any`
+> grouping, `eq`/`in`/`not_in`, relative-time comparisons, engagement
+> predicates. Flat v1 dicts remain valid and are auto-normalized. Segments
+> also drive workflow backfill and campaign sends (addendum 002 §3.2).
 
 ### 6.1 Workflow definition (JSON)
 
@@ -690,6 +697,10 @@ Also support `POST /api/ingest/aged` for bulk re-ingestion of older leads (diffe
 2. On success: set `delivered_at`
 3. On failure: increment `attempts`, exponential backoff (1m, 5m, 30m, 2h, 6h), give up at 10 attempts and alert
 
+Outbox rows carry a reason; `engagement_decay` (auto-suppression by the
+engagement scorer, addendum 002 §2) is distinguishable from a real
+unsubscribe so OTTO can treat it differently.
+
 ### 9.3 Inbound: OTTO suppression push
 
 `POST /api/suppressions/push` for OTTO to inform us that a user unsubscribed elsewhere. Insert into `suppressions` with `source='otto_push'`. Authenticate via shared secret in header.
@@ -799,6 +810,11 @@ class Settings(BaseSettings):
 - Send worker enforces per-second limit via token bucket in Postgres advisory lock or simple sleep loop.
 - Per-day quota tracked in DB; sends queue if quota exhausted, resume next day.
 - Per-recipient throttling: max 1 send per recipient per 24h.
+- Frequency governance (addendum 002): engagement-tier minimum gap (24h/72h/7d
+  by tier; dormant auto-suppressed by the nightly scorer), rolling weekly and
+  monthly caps, and recipient-local quiet hours (timezone from
+  `attributes.state`, fallback `send_default_timezone`). Ineligible sends are
+  re-queued forward, never failed.
 
 Dedicated IP warmup is handled by **SES Managed Dedicated IPs** (SPEC_ADDENDUM.md 001) — SES warms per-ISP adaptively and spills to the shared pool during ramp. No warmup schedule, per-day warmup caps, or IP selection logic in the send worker.
 
@@ -904,6 +920,13 @@ Use `pytest` + `pytest-asyncio` + `httpx` for API tests + `factory_boy` for fixt
 - Load test to 1M/mo throughput
 - Deployment automation
 - Runbook documentation
+
+---
+
+### Post-M7: Addendum 002 (approved 2026-07-22)
+- Frequency caps + quiet hours (send worker gates)
+- Engagement-decay tiers + nightly scorer + dormant auto-suppression
+- Segment DSL v2 + preview/backfill/segment-send endpoints
 
 ---
 
