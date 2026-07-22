@@ -1,6 +1,7 @@
 import { apiFetch } from "@/api/client";
 import type {
   CampaignsVolumeOut,
+  IspReputationOut,
   SESReputationOut,
   StatsBucket,
   StatsWindow,
@@ -40,6 +41,12 @@ export function getCampaignsVolume(
 export function getSesReputation(tenant = "otto"): Promise<SESReputationOut> {
   return apiFetch<SESReputationOut>(
     `/api/stats/ses-reputation?tenant=${encodeURIComponent(tenant)}`,
+  );
+}
+
+export function getIspReputation(tenant = "otto"): Promise<IspReputationOut> {
+  return apiFetch<IspReputationOut>(
+    `/api/stats/isp-reputation?tenant=${encodeURIComponent(tenant)}`,
   );
 }
 

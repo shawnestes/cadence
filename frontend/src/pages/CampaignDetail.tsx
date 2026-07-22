@@ -14,6 +14,7 @@ import type {
   CampaignSendResult,
   CampaignStatus,
   CampaignUpdate,
+  Template,
   TemplateStatus,
   TemplateUpdate,
 } from "@/api/types";
@@ -73,6 +74,8 @@ export function CampaignDetail() {
   const [generateResult, setGenerateResult] =
     useState<CampaignGenerateResult | null>(null);
   const [sendResult, setSendResult] = useState<CampaignSendResult | null>(null);
+  const [previewTemplate, setPreviewTemplate] = useState<Template | null>(null);
+  const [previewTab, setPreviewTab] = useState<"html" | "text">("html");
 
   const campaignQuery = useQuery({
     queryKey: ["campaign", id],
@@ -350,6 +353,16 @@ export function CampaignDetail() {
                       <Td className="font-mono text-xs tabular-nums">{formatDate(t.created_at)}</Td>
                       <Td>
                         <div className="flex flex-wrap gap-1">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => {
+                              setPreviewTemplate(t);
+                              setPreviewTab("html");
+                            }}
+                          >
+                            Preview
+                          </Button>
                           {t.status !== "approved" && (
                             <Button
                               size="sm"
@@ -431,6 +444,96 @@ export function CampaignDetail() {
           )}
         </CardContent>
       </Card>
+
+      {previewTemplate && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          onClick={() => setPreviewTemplate(null)}
+        >
+          <div
+            className="flex h-[85vh] w-full max-w-4xl flex-col overflow-hidden rounded-lg border border-border bg-surface-1 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-4 border-b border-border p-4">
+              <div className="min-w-0 space-y-1">
+                <div className="text-xs font-mono uppercase tracking-[0.1em] text-muted-foreground">
+                  {previewTemplate.cohort_key} / {previewTemplate.variant_label}
+                </div>
+                <div className="truncate text-sm font-semibold" title={previewTemplate.subject}>
+                  {previewTemplate.subject}
+                </div>
+                {previewTemplate.preheader && (
+                  <div
+                    className="truncate text-xs font-mono text-muted-foreground"
+                    title={previewTemplate.preheader}
+                  >
+                    {previewTemplate.preheader}
+                  </div>
+                )}
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setPreviewTemplate(null)}
+              >
+                Close
+              </Button>
+            </div>
+            <div className="flex gap-1 border-b border-border px-4 pt-2">
+              <button
+                type="button"
+                onClick={() => setPreviewTab("html")}
+                className={`px-3 py-2 text-xs font-mono uppercase tracking-[0.1em] border-b-2 ${
+                  previewTab === "html"
+                    ? "border-foreground text-foreground"
+                    : "border-transparent text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                HTML
+              </button>
+              <button
+                type="button"
+                onClick={() => setPreviewTab("text")}
+                className={`px-3 py-2 text-xs font-mono uppercase tracking-[0.1em] border-b-2 ${
+                  previewTab === "text"
+                    ? "border-foreground text-foreground"
+                    : "border-transparent text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                Plain text
+              </button>
+            </div>
+            <div className="border-b border-border px-4 py-1 text-xs font-mono text-muted-foreground tabular-nums">
+              html: {(previewTemplate.body_html ?? "").length} chars · text:{" "}
+              {(previewTemplate.body_text ?? "").length} chars
+            </div>
+            <div className="flex-1 overflow-hidden bg-surface-2">
+              {previewTab === "html" ? (
+                previewTemplate.body_html ? (
+                  <iframe
+                    title="template-preview"
+                    sandbox=""
+                    srcDoc={previewTemplate.body_html}
+                    className="h-full w-full border-0 bg-white"
+                  />
+                ) : (
+                  <div className="flex h-full items-center justify-center text-sm font-mono text-muted-foreground">
+                    (body_html is empty)
+                  </div>
+                )
+              ) : previewTemplate.body_text ? (
+                <pre className="h-full overflow-auto whitespace-pre-wrap p-4 text-sm font-mono">
+                  {previewTemplate.body_text}
+                </pre>
+              ) : (
+                <div className="flex h-full items-center justify-center text-sm font-mono text-muted-foreground">
+                  (body_text is empty)
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

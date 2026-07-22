@@ -3,12 +3,14 @@ import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, Wifi, WifiOff } from "lucide-react";
 
 import { listAlerts } from "@/api/alerts";
-import { getCampaignsVolume, getSesReputation, getTimeseries, getTopline, streamTopline } from "@/api/stats";
+import { getCampaignsVolume, getIspReputation, getSesReputation, getTimeseries, getTopline, streamTopline } from "@/api/stats";
 import type {
   AlertOut,
   AlertsListOut,
   CampaignVolumeRow,
   CampaignsVolumeOut,
+  IspReputationOut,
+  IspReputationRow,
   SESReputationOut,
   StatsBucket,
   StatsWindow,
@@ -34,6 +36,16 @@ function pct(rate: number): string {
 
 function fmt(n: number): string {
   return n.toLocaleString();
+}
+
+// "—" for null/undefined — CloudWatch-derived fields are null in dev and
+// must never render as NaN/undefined.
+function pctOrDash(rate: number | null | undefined): string {
+  return rate == null ? "—" : pct(rate);
+}
+
+function fmtOrDash(n: number | null | undefined): string {
+  return n == null ? "—" : fmt(n);
 }
 
 function bucketForWindow(window: StatsWindow): StatsBucket {
@@ -442,6 +454,187 @@ function RateLineChart({
 }
 
 // ---------------------------------------------------------------------------
+// Per-ISP reputation
+// ---------------------------------------------------------------------------
+
+const ISP_ORDER: IspReputationRow["isp"][] = ["Gmail", "Yahoo", "Outlook", "Apple", "Other"];
+
+function ispSort(a: IspReputationRow, b: IspReputationRow): number {
+  return ISP_ORDER.indexOf(a.isp) - ISP_ORDER.indexOf(b.isp);
+}
+
+// Buckets a rate into an alert tier. `null` (no CloudWatch data yet) is its
+// own neutral tier — never conflated with a real bad rate.
+type RateTier = "none" | "danger" | "warn" | "good";
+
+function rateTier(rate: number | null): RateTier {
+  if (rate == null) return "none";
+  if (rate < 0.9) return "danger";
+  if (rate < 0.97) return "warn";
+  return "good";
+}
+
+const TIER_BG: Record<RateTier, string> = {
+  none: "bg-border",
+  danger: "bg-danger",
+  warn: "bg-warn",
+  good: "bg-primary",
+};
+
+const TIER_TEXT: Record<RateTier, string> = {
+  none: "text-muted-foreground",
+  danger: "text-danger",
+  warn: "text-warn",
+  good: "text-foreground",
+};
+
+function PoolHealthStrip({
+  sendingAllowed,
+  dedicatedIpCount,
+}: {
+  sendingAllowed: boolean | null;
+  dedicatedIpCount: number | null;
+}) {
+  const allowedLabel =
+    sendingAllowed === null ? "Unknown" : sendingAllowed ? "Allowed" : "Paused";
+  const allowedColor =
+    sendingAllowed === null
+      ? "text-muted-foreground"
+      : sendingAllowed
+        ? "text-success"
+        : "text-danger";
+  const dotColor =
+    sendingAllowed === null
+      ? "bg-muted-foreground"
+      : sendingAllowed
+        ? "bg-success"
+        : "bg-danger";
+
+  return (
+    <div className="flex flex-wrap items-center gap-x-8 gap-y-2 border border-border bg-background/40 px-4 py-3 font-mono text-xs">
+      <div className="flex items-center gap-2">
+        <span className={`h-2 w-2 rounded-full flex-shrink-0 ${dotColor}`} />
+        <span className="text-[0.65rem] uppercase tracking-[0.15em] text-muted-foreground">
+          Sending Pool
+        </span>
+        <span className={`font-medium ${allowedColor}`}>{allowedLabel}</span>
+      </div>
+      <div className="flex items-center gap-2">
+        <span className="text-[0.65rem] uppercase tracking-[0.15em] text-muted-foreground">
+          Dedicated IPs
+        </span>
+        <span className="tabular-nums text-foreground">{fmtOrDash(dedicatedIpCount)}</span>
+      </div>
+    </div>
+  );
+}
+
+function IspTile({ row }: { row: IspReputationRow }) {
+  const tier = rateTier(row.delivery_rate);
+  const repFraction =
+    row.reputation == null ? null : Math.max(0, Math.min(1, row.reputation));
+
+  return (
+    <div className="border border-border p-3 flex flex-col gap-3">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-mono font-semibold uppercase tracking-[0.1em] text-foreground">
+          {row.isp}
+        </span>
+        <span className={`text-xs font-mono tabular-nums ${TIER_TEXT[tier]}`}>
+          {pctOrDash(row.delivery_rate)}
+        </span>
+      </div>
+
+      {/* Reputation gauge */}
+      <div>
+        <div className="flex justify-between mb-1">
+          <span className="text-[0.6rem] uppercase tracking-[0.15em] text-muted-foreground font-mono">
+            Reputation
+          </span>
+          <span className="text-[0.65rem] font-mono tabular-nums text-muted-foreground">
+            {pctOrDash(row.reputation)}
+          </span>
+        </div>
+        <div className="h-1.5 w-full bg-border overflow-hidden">
+          {repFraction !== null && (
+            <div
+              className={`h-full transition-all ${TIER_BG[rateTier(row.reputation)]}`}
+              style={{ width: `${(repFraction * 100).toFixed(1)}%` }}
+            />
+          )}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2 text-[0.65rem] font-mono">
+        <div>
+          <div className="uppercase tracking-[0.15em] text-muted-foreground">Sent</div>
+          <div className="tabular-nums text-foreground">{fmt(row.sent)}</div>
+        </div>
+        <div>
+          <div className="uppercase tracking-[0.15em] text-muted-foreground">Delivered</div>
+          <div className="tabular-nums text-foreground">{fmt(row.delivered)}</div>
+        </div>
+        <div className="col-span-2">
+          <div className="uppercase tracking-[0.15em] text-muted-foreground">
+            Effective Daily Rate
+          </div>
+          <div className="tabular-nums text-foreground">
+            {row.effective_daily_rate == null
+              ? "— no data"
+              : `${fmt(Math.round(row.effective_daily_rate))}/day`}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function IspDeliveryBarChart({ isps }: { isps: IspReputationRow[] }) {
+  if (isps.length === 0) {
+    return (
+      <div className="flex h-24 items-center justify-center text-sm text-muted-foreground">
+        No ISP data for this window.
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <p className="mb-3 text-[0.7rem] font-mono font-medium text-muted-foreground uppercase tracking-[0.15em]">
+        Delivery Rate by ISP
+      </p>
+      <div className="space-y-2.5">
+        {isps.map((row) => {
+          const tier = rateTier(row.delivery_rate);
+          const widthPct =
+            row.delivery_rate == null
+              ? 0
+              : Math.max(0, Math.min(1, row.delivery_rate)) * 100;
+          return (
+            <div key={row.isp} className="flex items-center gap-3">
+              <span className="w-16 flex-shrink-0 text-[0.65rem] font-mono uppercase tracking-[0.1em] text-muted-foreground">
+                {row.isp}
+              </span>
+              <div className="h-2.5 flex-1 bg-border overflow-hidden">
+                {row.delivery_rate != null && (
+                  <div
+                    className={`h-full transition-all ${TIER_BG[tier]}`}
+                    style={{ width: `${widthPct.toFixed(1)}%` }}
+                  />
+                )}
+              </div>
+              <span className="w-14 flex-shrink-0 text-right text-[0.65rem] font-mono tabular-nums text-muted-foreground">
+                {pctOrDash(row.delivery_rate)}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // SSE connection indicator
 // ---------------------------------------------------------------------------
 
@@ -519,6 +712,16 @@ export function Dashboard() {
   } = useQuery<SESReputationOut>({
     queryKey: ["ses-reputation", TENANT],
     queryFn: () => getSesReputation(TENANT),
+    retry: false,
+  });
+
+  const {
+    data: ispData,
+    isLoading: ispLoading,
+    error: ispError,
+  } = useQuery<IspReputationOut>({
+    queryKey: ["isp-reputation", TENANT],
+    queryFn: () => getIspReputation(TENANT),
     retry: false,
   });
 
@@ -843,6 +1046,57 @@ export function Dashboard() {
                   </div>
                 </div>
               </div>
+            ) : null}
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* ---- Per-ISP reputation ---- */}
+      <div>
+        <p className="mb-3 text-[0.7rem] font-mono font-medium text-muted-foreground uppercase tracking-[0.15em]">
+          Per-ISP Reputation
+        </p>
+        <Card>
+          <CardHeader>
+            <CardTitle>Inbox Provider Health</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-6">
+            {ispLoading ? (
+              <div className="flex h-32 items-center justify-center text-sm text-muted-foreground">
+                Loading...
+              </div>
+            ) : ispError ? (
+              <div className="flex h-32 flex-col items-center justify-center gap-1 text-center">
+                <span className="text-[0.65rem] font-mono uppercase tracking-[0.15em] text-muted-foreground">
+                  Not Available
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  {(ispError as Error).message}
+                </span>
+              </div>
+            ) : ispData ? (
+              <>
+                <PoolHealthStrip
+                  sendingAllowed={ispData.sending_allowed}
+                  dedicatedIpCount={ispData.dedicated_ip_count}
+                />
+
+                {ispData.isps.length === 0 ? (
+                  <div className="flex h-24 items-center justify-center text-sm text-muted-foreground">
+                    No ISP data for this window.
+                  </div>
+                ) : (
+                  <>
+                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+                      {[...ispData.isps].sort(ispSort).map((row) => (
+                        <IspTile key={row.isp} row={row} />
+                      ))}
+                    </div>
+
+                    <IspDeliveryBarChart isps={[...ispData.isps].sort(ispSort)} />
+                  </>
+                )}
+              </>
             ) : null}
           </CardContent>
         </Card>

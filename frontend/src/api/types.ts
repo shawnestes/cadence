@@ -138,6 +138,24 @@ export type SESReputationOut = {
   fetched_at: string;
 };
 
+// ------------------ ISP Reputation ------------------
+export type IspName = "Gmail" | "Yahoo" | "Outlook" | "Apple" | "Other";
+
+export type IspReputationRow = {
+  isp: IspName;
+  reputation: number | null;
+  delivery_rate: number | null;
+  sent: number;
+  delivered: number;
+  effective_daily_rate: number | null;
+};
+
+export type IspReputationOut = {
+  sending_allowed: boolean | null;
+  dedicated_ip_count: number | null;
+  isps: IspReputationRow[];
+};
+
 // ------------------ Recipients ------------------
 export type RecipientSummary = {
   id: string;
