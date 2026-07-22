@@ -9,6 +9,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.workers import (
+    engagement_scorer,
     otto_sync,
     partition_maintenance,
     reputation_monitor,
@@ -76,6 +77,14 @@ async def main() -> None:
         "interval",
         hours=24,
         id="partition_maintenance",
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        engagement_scorer.run_once,
+        "cron",
+        hour=3,
+        id="engagement_scorer",
         max_instances=1,
         coalesce=True,
     )

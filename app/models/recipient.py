@@ -27,6 +27,12 @@ class Recipient(Base, TimestampMixin):
         server_default=text("'{}'::jsonb"),
     )
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'active'"))
+    engagement_tier: Mapped[str] = mapped_column(
+        Text, nullable=False, default="neutral", server_default=text("'neutral'")
+    )
+    tier_computed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     __table_args__ = (
         UniqueConstraint("tenant", "email", name="uq_recipients_tenant_email"),

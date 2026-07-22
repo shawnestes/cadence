@@ -45,6 +45,18 @@ class Settings(BaseSettings):
     send_rate_limit_per_second: int = 14
     send_daily_quota: int = 50000
 
+    # Frequency governance (addendum 002 §1)
+    frequency_cap_per_week: int = 3
+    frequency_cap_per_month: int = 8
+    send_window_start_hour: int = 9
+    send_window_end_hour: int = 20
+    send_default_timezone: str = "America/Chicago"
+
+    # Engagement decay (addendum 002 §2)
+    engagement_engaged_window_days: int = 30
+    engagement_cold_after_unopened: int = 5
+    engagement_dormant_after_unopened: int = 10
+
     # Workflow engine
     workflow_tick_interval_seconds: int = 10
 
