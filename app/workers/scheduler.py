@@ -85,7 +85,12 @@ async def main() -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, stop.set)
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except NotImplementedError:
+            # Windows event loops don't support signal handlers; rely on
+            # KeyboardInterrupt / process termination instead.
+            break
 
     await stop.wait()
     scheduler.shutdown(wait=True)
