@@ -1,19 +1,26 @@
+from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api._enrollment import EnrollmentOutcome, enroll_recipient
 from app.core.db import get_db
+from app.domain.segment import normalize
 from app.domain.workflow_defs import WorkflowDefinition
+from app.models.recipient import Recipient
+from app.models.suppression import Suppression
 from app.models.workflow import Workflow
 from app.models.workflow_version import WorkflowVersion
+from app.schemas.segment import WorkflowBackfillRequest, WorkflowBackfillResponse
 from app.schemas.workflow import (
     WorkflowIn,
     WorkflowListOut,
     WorkflowOut,
     WorkflowUpdate,
 )
+from app.services.segment_query import compile_segment
 
 router = APIRouter(tags=["workflows"])
 
@@ -197,3 +204,86 @@ async def archive_workflow(
     await db.commit()
     await db.refresh(row)
     return WorkflowOut.model_validate(row)
+
+
+@router.post("/workflows/{workflow_id}/backfill", response_model=WorkflowBackfillResponse)
+async def backfill_workflow(
+    workflow_id: UUID,
+    payload: WorkflowBackfillRequest,
+    tenant: str = Query(default="otto"),
+    db: AsyncSession = Depends(get_db),
+) -> WorkflowBackfillResponse:
+    """Enroll existing recipients matching ``payload.segment`` into a workflow.
+
+    Unlike ingest-time auto-enroll, the segment here is operator-supplied
+    and independent of the workflow's own ``entry_segment`` — this lets an
+    operator target a broader or different segment for a one-off backfill.
+    Candidates are capped at ``payload.limit`` (<=10000, enforced by the
+    schema) directly in the SQL query (ORDER BY id LIMIT), never pulling
+    more rows than that into Python.
+    """
+    wf = await _load(db, workflow_id, tenant)
+
+    entry_node_id = (wf.definition or {}).get("entry")
+    if not entry_node_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="workflow has no entry node defined; cannot backfill",
+        )
+
+    try:
+        normalize(payload.segment)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+
+    now = datetime.now(timezone.utc)
+    predicate = compile_segment(payload.segment, now=now)
+
+    candidates = (
+        await db.execute(
+            select(Recipient)
+            .where(Recipient.tenant == tenant)
+            .where(predicate)
+            .order_by(Recipient.id)
+            .limit(payload.limit)
+        )
+    ).scalars().all()
+
+    suppressed_emails: set[str] = set()
+    if candidates:
+        rows = (
+            await db.execute(
+                select(Suppression.email)
+                .where(Suppression.tenant == tenant)
+                .where(Suppression.email.in_([r.email for r in candidates]))
+            )
+        ).scalars().all()
+        suppressed_emails = {e.lower() for e in rows}
+
+    enrolled = 0
+    skipped_active = 0
+    skipped_cooldown = 0
+    skipped_suppressed = 0
+
+    for recipient in candidates:
+        if recipient.email.lower() in suppressed_emails:
+            skipped_suppressed += 1
+            continue
+
+        result = await enroll_recipient(db, wf, recipient.id, tenant, now)
+        if result.outcome == EnrollmentOutcome.ENROLLED:
+            enrolled += 1
+        elif result.outcome == EnrollmentOutcome.SKIPPED_ACTIVE:
+            skipped_active += 1
+        elif result.outcome == EnrollmentOutcome.SKIPPED_COOLDOWN:
+            skipped_cooldown += 1
+        # SKIPPED_NO_ENTRY_NODE can't happen here — checked up front above.
+
+    return WorkflowBackfillResponse(
+        enrolled=enrolled,
+        skipped_active=skipped_active,
+        skipped_cooldown=skipped_cooldown,
+        skipped_suppressed=skipped_suppressed,
+    )

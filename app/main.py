@@ -10,6 +10,7 @@ from app.api import (
     ingest,
     metrics,
     recipients,
+    segments,
     stats,
     suppressions,
     templates,
@@ -75,4 +76,9 @@ app.include_router(
 app.include_router(
     alerts.router,
     prefix="/api",
+)
+app.include_router(
+    segments.router,
+    prefix="/api",
+    dependencies=[Depends(require_api_key)],
 )

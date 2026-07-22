@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.esp.factory import get_esp_adapter
 from app.core.db import get_db
+from app.domain.segment import normalize
 from app.domain.variant_picker import pick_variant
 from app.models.campaign import Campaign
 from app.models.recipient import Recipient
@@ -20,6 +21,7 @@ from app.schemas.campaign import (
     CampaignSendResult,
     CampaignUpdate,
 )
+from app.services.segment_query import compile_segment
 
 router = APIRouter(tags=["campaigns"])
 
@@ -138,10 +140,26 @@ async def send_campaign(
     MAX_INPUTS = 10_000
     BATCH_SIZE = 500
 
+    selectors_provided = sum(
+        1
+        for v in (payload.recipient_ids, payload.email_list, payload.segment)
+        if v is not None
+    )
+    if selectors_provided == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="exactly one of recipient_ids, email_list, or segment is required",
+        )
+    if selectors_provided > 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="provide exactly one of recipient_ids, email_list, or segment, not more than one",
+        )
+
     skipped_not_found = 0
     recipients: list[Recipient] = []
 
-    if payload.recipient_ids:
+    if payload.recipient_ids is not None:
         if len(payload.recipient_ids) > MAX_INPUTS:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -157,7 +175,7 @@ async def send_campaign(
         found_ids = {r.id for r in rows}
         skipped_not_found = len([rid for rid in payload.recipient_ids if rid not in found_ids])
         recipients = list(rows)
-    elif payload.email_list:
+    elif payload.email_list is not None:
         if len(payload.email_list) > MAX_INPUTS:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -179,10 +197,35 @@ async def send_campaign(
         )
         recipients = list(rows)
     else:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="recipient_ids or email_list required",
-        )
+        try:
+            normalize(payload.segment)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+
+        predicate = compile_segment(payload.segment)
+        segment_count = (
+            await db.execute(
+                select(func.count())
+                .select_from(Recipient)
+                .where(Recipient.tenant == payload.tenant)
+                .where(predicate)
+            )
+        ).scalar_one()
+        if segment_count > MAX_INPUTS:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"segment matches {segment_count} recipients, exceeds {MAX_INPUTS}",
+            )
+        rows = (
+            await db.execute(
+                select(Recipient)
+                .where(Recipient.tenant == payload.tenant)
+                .where(predicate)
+            )
+        ).scalars().all()
+        recipients = list(rows)
 
     esp_name = get_esp_adapter().name
     now = datetime.now(timezone.utc)

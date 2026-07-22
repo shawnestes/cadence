@@ -185,3 +185,104 @@ async def test_send_endpoint_requires_auth(client):
         json={"recipient_ids": [str(uuid.uuid4())], "tenant": "otto"},
     )
     assert resp.status_code == 401
+
+
+async def test_send_rejects_zero_selectors(client, auth_headers):
+    c = await client.post("/api/campaigns", json=_campaign_body(), headers=auth_headers)
+    cid = c.json()["id"]
+    resp = await client.post(
+        f"/api/campaigns/{cid}/send",
+        json={"tenant": "otto"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 400
+
+
+async def test_send_rejects_more_than_one_selector(client, auth_headers):
+    c = await client.post("/api/campaigns", json=_campaign_body(), headers=auth_headers)
+    cid = c.json()["id"]
+    resp = await client.post(
+        f"/api/campaigns/{cid}/send",
+        json={
+            "recipient_ids": [str(uuid.uuid4())],
+            "email_list": ["a@cadencetests.io"],
+            "tenant": "otto",
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 400
+
+
+async def test_send_rejects_all_three_selectors(client, auth_headers):
+    c = await client.post("/api/campaigns", json=_campaign_body(), headers=auth_headers)
+    cid = c.json()["id"]
+    resp = await client.post(
+        f"/api/campaigns/{cid}/send",
+        json={
+            "recipient_ids": [str(uuid.uuid4())],
+            "email_list": ["a@cadencetests.io"],
+            "segment": {"vertical": "auto"},
+            "tenant": "otto",
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 400
+
+
+async def test_send_by_segment_enqueues_only_matching_recipients(
+    client, auth_headers, db_session
+):
+    c = await client.post("/api/campaigns", json=_campaign_body(), headers=auth_headers)
+    cid = c.json()["id"]
+
+    t = await client.post("/api/templates", json=_template_body(cid), headers=auth_headers)
+    assert t.status_code == 201
+    tid = t.json()["id"]
+    patch = await client.patch(
+        f"/api/templates/{tid}", json={"status": "approved"}, headers=auth_headers
+    )
+    assert patch.status_code == 200
+
+    matching_email = f"test-{uuid.uuid4()}@cadencetests.io"
+    r_match = await client.post(
+        "/api/ingest/recipients",
+        json=_recipient_body(matching_email, attributes={"state": "TX"}),
+        headers=auth_headers,
+    )
+    assert r_match.status_code == 201
+    matching_id = r_match.json()["id"]
+
+    non_matching_email = f"test-{uuid.uuid4()}@cadencetests.io"
+    r_nomatch = await client.post(
+        "/api/ingest/recipients",
+        json=_recipient_body(non_matching_email, attributes={"state": "CA"}),
+        headers=auth_headers,
+    )
+    assert r_nomatch.status_code == 201
+
+    resp = await client.post(
+        f"/api/campaigns/{cid}/send",
+        json={"segment": {"attributes.state": "TX"}, "tenant": "otto"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["queued"] == 1
+
+    rows = (
+        await db_session.execute(select(Send).where(Send.campaign_id == uuid.UUID(cid)))
+    ).scalars().all()
+    assert len(rows) == 1
+    assert str(rows[0].recipient_id) == matching_id
+
+
+async def test_send_by_invalid_segment_returns_400(client, auth_headers):
+    c = await client.post("/api/campaigns", json=_campaign_body(), headers=auth_headers)
+    cid = c.json()["id"]
+
+    resp = await client.post(
+        f"/api/campaigns/{cid}/send",
+        json={"segment": {"all": "not-a-list"}, "tenant": "otto"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 400

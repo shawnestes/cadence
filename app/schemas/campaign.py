@@ -52,6 +52,7 @@ class CampaignListOut(BaseModel):
 class CampaignSendRequest(BaseModel):
     recipient_ids: list[UUID] | None = None
     email_list: list[str] | None = None
+    segment: dict | None = None
     tenant: str = "otto"
 
 
