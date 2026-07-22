@@ -10,6 +10,10 @@ asyncpg engine's pool reject futures with "attached to a different loop".
 
 Rows created during a test must use emails ending in `@cadencetests.io`; the
 autouse `_clean_test_rows` fixture deletes them before and after each test.
+
+Tests run against the local Docker Postgres (docker compose -f
+docker-compose.test.yml up -d --wait), NOT the shared Aurora dev DB. Set
+CADENCE_TEST_DATABASE_URL to point somewhere else.
 """
 
 from __future__ import annotations
@@ -17,19 +21,54 @@ from __future__ import annotations
 import os
 
 # Must run before any `app` import because get_settings() requires CADENCE_*.
-# CADENCE_DATABASE_URL comes from .env (real Aurora) — tests use the live cadence DB.
+# Real env vars take precedence over .env in pydantic-settings, so this
+# redirects tests away from the Aurora URL in .env.
+_TEST_DB_URL = os.environ.get(
+    "CADENCE_TEST_DATABASE_URL",
+    # 127.0.0.1, not localhost: on Windows, ::1 reaches Docker's proxy but the
+    # handshake never completes, stalling every new connection ~25s before
+    # asyncpg falls back to IPv4.
+    "postgresql+asyncpg://cadence:cadence@127.0.0.1:5433/cadence_test",
+)
+os.environ["CADENCE_DATABASE_URL"] = _TEST_DB_URL
 os.environ.setdefault("CADENCE_API_KEY", "test-api-key")
 # Tests must never hit the real Anthropic API: real env vars take precedence
 # over .env in pydantic-settings, so this forces the mock backend.
 os.environ["CADENCE_AI_BACKEND"] = "mock"
+
+import asyncio
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 
-from app.core.db import async_session_factory
+from app.core.db import async_session_factory, engine
+from app.core.partitions import ensure_events_partitions
 from app.main import app
+
+
+def _run_migrations() -> None:
+    from alembic import command
+    from alembic.config import Config
+
+    root = Path(__file__).parents[1]
+    cfg = Config(str(root / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "alembic"))
+    command.upgrade(cfg, "head")
+
+
+@pytest_asyncio.fixture(scope="session", autouse=True)
+async def _bootstrap_test_db():
+    """Bring the test DB to head + ensure event partitions.
+
+    The docker-compose test DB is tmpfs-backed, so every container restart
+    starts empty — the suite must be self-bootstrapping.
+    """
+    await asyncio.to_thread(_run_migrations)
+    async with engine.begin() as conn:
+        await ensure_events_partitions(conn)
 
 
 @pytest.fixture(scope="session")

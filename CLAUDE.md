@@ -50,9 +50,10 @@ uv run python -m app.workers.scheduler
 uv run alembic upgrade head
 uv run alembic revision --autogenerate -m "description"
 
-# Tests
+# Tests (need the local test DB running; tmpfs-backed, suite self-migrates)
+docker compose -f docker-compose.test.yml up -d --wait
 uv run pytest
-uv run pytest tests/integration -v
+# Point tests elsewhere: set CADENCE_TEST_DATABASE_URL
 ```
 
 ## Things that will trip you up
