@@ -19,6 +19,9 @@ import os
 # Must run before any `app` import because get_settings() requires CADENCE_*.
 # CADENCE_DATABASE_URL comes from .env (real Aurora) — tests use the live cadence DB.
 os.environ.setdefault("CADENCE_API_KEY", "test-api-key")
+# Tests must never hit the real Anthropic API: real env vars take precedence
+# over .env in pydantic-settings, so this forces the mock backend.
+os.environ["CADENCE_AI_BACKEND"] = "mock"
 
 import pytest
 import pytest_asyncio
@@ -58,7 +61,12 @@ async def db_session():
 
 
 @pytest_asyncio.fixture(autouse=True)
-async def _clean_test_rows():
+async def _clean_test_rows(request: pytest.FixtureRequest):
+    # Domain tests are pure logic — skip the DB purge round trips entirely.
+    if "domain" in request.node.path.parts:
+        yield
+        return
+
     async def _purge() -> None:
         async with async_session_factory() as s:
             await s.execute(
@@ -85,6 +93,12 @@ async def _clean_test_rows():
             await s.execute(
                 text(
                     "DELETE FROM journeys WHERE workflow_id IN "
+                    "(SELECT id FROM workflows WHERE name LIKE 'test-%')"
+                )
+            )
+            await s.execute(
+                text(
+                    "DELETE FROM workflow_versions WHERE workflow_id IN "
                     "(SELECT id FROM workflows WHERE name LIKE 'test-%')"
                 )
             )

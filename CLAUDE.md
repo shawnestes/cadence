@@ -1,3 +1,5 @@
+All Agent tool calls must pass model: \"sonnet\". Never dispatch subagents on Opus.
+
 # CLAUDE.md
 
 Working instructions for Claude Code on this repo. Read this before doing anything.

@@ -14,11 +14,13 @@ from app.models.template import Template
 from app.workers.ai_generator import generate_for_campaign
 
 
-async def _seed_campaign(db_session, *, ai_brief: str = "test brief") -> Campaign:
+async def _seed_campaign(
+    db_session, *, ai_brief: str = "test brief", vertical: str = "auto"
+) -> Campaign:
     c = Campaign(
         tenant="otto",
         name=f"test-{uuid.uuid4()}",
-        vertical="auto",
+        vertical=vertical,
         ai_brief=ai_brief,
     )
     db_session.add(c)
@@ -98,7 +100,9 @@ async def test_generate_for_campaign_missing_returns_error():
 
 
 async def test_generate_for_campaign_no_recipients(db_session):
-    c = await _seed_campaign(db_session)
+    # Unique vertical so live seed/demo recipients in the shared dev DB
+    # can never match this campaign's cohort query.
+    c = await _seed_campaign(db_session, vertical=f"test-vert-{uuid.uuid4().hex[:8]}")
     campaign_id = c.id
 
     result = await generate_for_campaign(campaign_id, variants_per_cohort=3)

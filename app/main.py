@@ -1,3 +1,6 @@
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import Depends, FastAPI
 
 from app.api import (
@@ -16,11 +19,21 @@ from app.api import (
 )
 from app.core.auth import require_api_key
 from app.core.config import get_settings
+from app.core.db import engine
 from app.core.logging import configure_logging
+from app.core.partitions import ensure_events_partitions
 
 configure_logging(get_settings().log_level)
 
-app = FastAPI(title=get_settings().app_name)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    async with engine.begin() as conn:
+        await ensure_events_partitions(conn)
+    yield
+
+
+app = FastAPI(title=get_settings().app_name, lifespan=lifespan)
 app.include_router(health.router)
 app.include_router(metrics.router)
 app.include_router(webhooks.router)

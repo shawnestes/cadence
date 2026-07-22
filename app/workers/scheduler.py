@@ -8,7 +8,15 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.core.config import get_settings
 from app.core.logging import configure_logging
-from app.workers import otto_sync, reputation_monitor, send_worker, stats_rollup, variant_retirement, workflow_tick
+from app.workers import (
+    otto_sync,
+    partition_maintenance,
+    reputation_monitor,
+    send_worker,
+    stats_rollup,
+    variant_retirement,
+    workflow_tick,
+)
 
 
 async def main() -> None:
@@ -60,6 +68,14 @@ async def main() -> None:
         "interval",
         seconds=get_settings().alert_monitor_interval_seconds,
         id="reputation_monitor",
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        partition_maintenance.run_once,
+        "interval",
+        hours=24,
+        id="partition_maintenance",
         max_instances=1,
         coalesce=True,
     )
