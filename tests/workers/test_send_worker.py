@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
+from app.core.config import get_settings
 from app.core.db import async_session_factory
 from app.models.campaign import Campaign
 from app.models.recipient import Recipient
@@ -14,6 +15,10 @@ from app.models.send import Send
 from app.models.suppression import Suppression
 from app.models.template import Template
 from app.workers import send_worker
+
+# Sorts ahead of any realistically-timestamped queued row on the shared DB,
+# so our seeded rows are the ones the phase-1 claim query picks up first.
+_ANCIENT = datetime(2000, 1, 1, tzinfo=timezone.utc)
 
 
 async def _read_send(send_id):
@@ -71,8 +76,7 @@ async def _seed_campaign_template(
     return c, t
 
 
-async def _seed_queued_send(db_session, campaign, template, recipient):
-    now = datetime.now(timezone.utc)
+async def _seed_queued_send(db_session, campaign, template, recipient, queued_at=None):
     s = Send(
         tenant="otto",
         campaign_id=campaign.id,
@@ -83,12 +87,53 @@ async def _seed_queued_send(db_session, campaign, template, recipient):
         esp="noop",
         rendered_subject=template.subject,
         status="queued",
-        queued_at=now,
+        queued_at=queued_at or datetime.now(timezone.utc),
     )
     db_session.add(s)
     await db_session.commit()
     await db_session.refresh(s)
     return s
+
+
+async def _seed_prior_sent_send(db_session, campaign, template, recipient, sent_at):
+    """Seed a Send row that already went out, to backfill quota/throttle history."""
+    now = datetime.now(timezone.utc)
+    s = Send(
+        tenant="otto",
+        campaign_id=campaign.id,
+        template_id=template.id,
+        recipient_id=recipient.id,
+        cohort_key=template.cohort_key,
+        variant_label=template.variant_label,
+        esp="noop",
+        esp_message_id=f"noop-{uuid.uuid4()}",
+        rendered_subject=template.subject,
+        status="sent",
+        queued_at=now,
+        sent_at=sent_at,
+    )
+    db_session.add(s)
+    await db_session.commit()
+    await db_session.refresh(s)
+    return s
+
+
+async def _count_sent_today(db_session) -> int:
+    today_start = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    result = await db_session.execute(
+        select(func.count()).select_from(Send).where(Send.sent_at >= today_start)
+    )
+    return result.scalar_one()
+
+
+def _settings_override(monkeypatch, **overrides):
+    """Monkeypatch send_worker's cached settings with the given overrides applied."""
+    base = get_settings()
+    patched = base.model_copy(update=overrides)
+    monkeypatch.setattr(send_worker, "get_settings", lambda: patched)
+    return patched
 
 
 async def test_run_once_sends_queued_row(db_session):
@@ -148,3 +193,101 @@ async def test_run_once_missing_merge_tag(db_session):
     assert refreshed.status == "failed"
     assert refreshed.failure_reason is not None
     assert "merge tag" in refreshed.failure_reason.lower()
+
+
+# --- Per-day account quota ---------------------------------------------------
+
+
+async def test_run_once_quota_exhausted_leaves_sends_queued(db_session, monkeypatch):
+    email = f"test-{uuid.uuid4()}@cadencetests.io"
+    r = await _seed_recipient(db_session, email)
+    c, t = await _seed_campaign_template(db_session)
+    s = await _seed_queued_send(db_session, c, t, r, queued_at=_ANCIENT)
+
+    sent_today = await _count_sent_today(db_session)
+    # Quota already met (or exceeded) by whatever's been sent today, so this
+    # cycle must dispatch nothing.
+    _settings_override(monkeypatch, send_daily_quota=sent_today)
+
+    result = await send_worker.run_once()
+
+    assert result["sent"] == 0
+    assert result["failed"] == 0
+
+    refreshed = await _read_send(s.id)
+    assert refreshed.status == "queued"
+    assert refreshed.failure_reason is None
+
+
+async def test_run_once_quota_decrements_within_cycle(db_session, monkeypatch):
+    email_a = f"test-{uuid.uuid4()}@cadencetests.io"
+    email_b = f"test-{uuid.uuid4()}@cadencetests.io"
+    r_a = await _seed_recipient(db_session, email_a)
+    r_b = await _seed_recipient(db_session, email_b)
+    c, t = await _seed_campaign_template(db_session)
+    s_a = await _seed_queued_send(db_session, c, t, r_a, queued_at=_ANCIENT)
+    s_b = await _seed_queued_send(
+        db_session, c, t, r_b, queued_at=_ANCIENT + timedelta(microseconds=1)
+    )
+
+    sent_today = await _count_sent_today(db_session)
+    # Room for exactly one more send this cycle: the in-memory decrement
+    # (not a fresh per-send COUNT query) must stop the second one.
+    _settings_override(monkeypatch, send_daily_quota=sent_today + 1)
+
+    result = await send_worker.run_once()
+
+    assert result["sent"] == 1
+
+    refreshed_a = await _read_send(s_a.id)
+    refreshed_b = await _read_send(s_b.id)
+    statuses = {refreshed_a.status, refreshed_b.status}
+    assert statuses == {"sent", "queued"}
+    # Whichever one didn't send stayed queued, not failed.
+    for row in (refreshed_a, refreshed_b):
+        assert row.failure_reason is None
+
+
+# --- Per-recipient throttle (max 1 send / 24h) -------------------------------
+
+
+async def test_run_once_recipient_throttled_within_24h(db_session, monkeypatch):
+    _settings_override(monkeypatch, send_daily_quota=10_000_000)
+
+    email = f"test-{uuid.uuid4()}@cadencetests.io"
+    r = await _seed_recipient(db_session, email)
+    c, t = await _seed_campaign_template(db_session)
+    now = datetime.now(timezone.utc)
+    await _seed_prior_sent_send(db_session, c, t, r, sent_at=now - timedelta(hours=1))
+    s = await _seed_queued_send(db_session, c, t, r, queued_at=_ANCIENT)
+
+    result = await send_worker.run_once()
+
+    assert result["throttled"] == 1
+    assert result["sent"] == 0
+
+    refreshed = await _read_send(s.id)
+    assert refreshed.status == "queued"
+    assert refreshed.failure_reason is None
+    # Rescheduled forward, not left claimable immediately (avoids a hot spin
+    # loop re-claiming the same throttled recipient every cycle).
+    assert refreshed.queued_at > now
+
+
+async def test_run_once_recipient_sent_after_24h(db_session, monkeypatch):
+    _settings_override(monkeypatch, send_daily_quota=10_000_000)
+
+    email = f"test-{uuid.uuid4()}@cadencetests.io"
+    r = await _seed_recipient(db_session, email)
+    c, t = await _seed_campaign_template(db_session)
+    now = datetime.now(timezone.utc)
+    await _seed_prior_sent_send(db_session, c, t, r, sent_at=now - timedelta(hours=25))
+    s = await _seed_queued_send(db_session, c, t, r, queued_at=_ANCIENT)
+
+    result = await send_worker.run_once()
+
+    assert result["sent"] == 1
+
+    refreshed = await _read_send(s.id)
+    assert refreshed.status == "sent"
+    assert refreshed.sent_at is not None
