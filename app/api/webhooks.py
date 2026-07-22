@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 import httpx
@@ -9,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.adapters.esp import ses as ses_mod
 from app.adapters.esp.factory import get_esp_adapter
 from app.core.db import get_db
 from app.models.base import uuid7
@@ -34,6 +36,47 @@ async def _savepoint_add(db: AsyncSession, obj) -> None:
         logger.debug("webhook.duplicate_row_ignored", model=type(obj).__name__)
 
 
+async def _auto_confirm_subscription(payload: dict) -> None:
+    """Verify and auto-confirm an SNS SubscriptionConfirmation (SPEC §8.3).
+
+    Signature verification (which may fetch/cache a signing cert over HTTPS)
+    runs off the event loop via ``asyncio.to_thread``. Failures are logged,
+    never raised, so a bad/forged confirmation just results in a no-op 200.
+    """
+    topic_arn = payload.get("TopicArn")
+    subscribe_url = payload.get("SubscribeURL")
+
+    verified = await asyncio.to_thread(ses_mod._verify_sns_signature, payload)
+    if not verified:
+        logger.warning(
+            "webhook.subscription_confirmation_signature_invalid",
+            topic_arn=topic_arn,
+        )
+        return
+
+    if not subscribe_url or not ses_mod._is_allowed_cert_host(subscribe_url):
+        logger.warning(
+            "webhook.subscription_confirmation_url_rejected",
+            topic_arn=topic_arn,
+            subscribe_url=subscribe_url,
+        )
+        return
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as http_client:
+            resp = await http_client.get(subscribe_url)
+            resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "webhook.subscription_confirmation_get_failed",
+            topic_arn=topic_arn,
+            error=str(exc),
+        )
+        return
+
+    logger.info("webhook.subscription_confirmed", topic_arn=topic_arn)
+
+
 @router.post("/webhooks/ses", status_code=status.HTTP_200_OK)
 async def ses_webhook(
     request: Request,
@@ -50,18 +93,12 @@ async def ses_webhook(
     msg_type = payload.get("Type") or x_amz_sns_message_type
 
     if msg_type == "SubscriptionConfirmation":
-        subscribe_url = payload.get("SubscribeURL")
-        if subscribe_url:
-            try:
-                async with httpx.AsyncClient(timeout=5.0) as client:
-                    resp = await client.get(subscribe_url)
-                logger.info(
-                    "webhook.subscription_confirmed",
-                    status=resp.status_code,
-                    topic_arn=payload.get("TopicArn"),
-                )
-            except httpx.HTTPError as exc:
-                logger.warning("webhook.subscription_confirm_failed", error=str(exc))
+        logger.info(
+            "webhook.subscription_confirmation_received",
+            topic_arn=payload.get("TopicArn"),
+            subscribe_url=payload.get("SubscribeURL"),
+        )
+        await _auto_confirm_subscription(payload)
         return Response(status_code=200)
 
     if msg_type == "UnsubscribeConfirmation":
@@ -74,7 +111,12 @@ async def ses_webhook(
 
     try:
         adapter = get_esp_adapter()
-        events = adapter.parse_webhook(payload, payload.get("Signature"))
+        # parse_webhook may synchronously fetch/cache an SNS signing cert over
+        # HTTPS on a cache miss; run it off the event loop so a slow/hanging
+        # fetch can't block other requests for up to 5s.
+        events = await asyncio.to_thread(
+            adapter.parse_webhook, payload, payload.get("Signature")
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("webhook.parse_failed", error=str(exc))
         return Response(status_code=200)

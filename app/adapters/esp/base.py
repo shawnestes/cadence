@@ -35,10 +35,24 @@ class ParsedEvent:
 
 
 @dataclass(slots=True)
+class IspReputationMetric:
+    """Per-ISP reputation signal pulled from CloudWatch for a managed IP pool."""
+
+    isp: str
+    reputation: float | None
+    effective_daily_rate: float | None
+
+
+@dataclass(slots=True)
 class ReputationSnapshot:
     account_sending_enabled: bool
     bounce_rate_24h: float | None
     complaint_rate_24h: float | None
+    # Managed Dedicated IP pool signals (addendum §2.4). None when no pool is
+    # configured or CloudWatch is unreachable.
+    managed_sending_allowed: bool | None = None
+    managed_dedicated_ip_count: float | None = None
+    isp_metrics: list[IspReputationMetric] = field(default_factory=list)
     raw: dict = field(default_factory=dict)
 
 

@@ -12,15 +12,21 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.adapters.esp.base import IspReputationMetric
+from app.adapters.esp.factory import get_esp_adapter
 from app.core.auth import require_api_key
 from app.core.config import get_settings
 from app.core.db import async_session_factory, get_db
+from app.domain.isp import classify_isp_from_cloudwatch_label, classify_isp_from_domain
 from app.models.campaign import Campaign
 from app.models.event import Event
+from app.models.recipient import Recipient
 from app.models.send import Send
 from app.schemas.stats import (
     CampaignVolumeRow,
     CampaignsVolumeOut,
+    IspReputationOut,
+    IspReputationRow,
     SESReputationOut,
     Topline,
     TimeseriesOut,
@@ -35,6 +41,9 @@ router = APIRouter(tags=["stats"])
 
 WindowLiteral = Literal["24h", "7d", "30d"]
 BucketLiteral = Literal["1h", "1d"]
+
+_ISP_REPUTATION_WINDOW = "7d"
+_ISP_BUCKETS: tuple[str, ...] = ("Gmail", "Yahoo", "Outlook", "Apple", "Other")
 
 
 def _window_start(window: str) -> datetime:
@@ -343,4 +352,93 @@ async def get_ses_reputation(
         max_send_rate=float(quota.get("MaxSendRate") or 0.0),
         reputation_sending_enabled=reputation_sending_enabled,
         fetched_at=datetime.now(timezone.utc),
+    )
+
+
+async def _isp_send_totals(db: AsyncSession, tenant: str) -> dict[str, dict[str, int]]:
+    """DB-derived sent/delivered counts over the last 7 days, bucketed by ISP.
+
+    Buckets are derived from the recipient's email domain via
+    `classify_isp_from_domain` (app/domain/isp.py — pure, no DB/HTTP
+    dependency of its own).
+    """
+    start = _window_start(_ISP_REPUTATION_WINDOW)
+    domain_col = func.lower(func.split_part(Recipient.email, "@", 2)).label("domain")
+
+    q = (
+        select(
+            domain_col,
+            func.count()
+            .filter(Send.status.in_(("sent", "delivered", "bounced", "complained")))
+            .label("sent"),
+            func.count().filter(Send.status == "delivered").label("delivered"),
+        )
+        .join(Recipient, Recipient.id == Send.recipient_id)
+        .where(Send.tenant == tenant, Send.queued_at >= start)
+        .group_by(domain_col)
+    )
+    rows = (await db.execute(q)).all()
+
+    totals: dict[str, dict[str, int]] = {
+        isp: {"sent": 0, "delivered": 0} for isp in _ISP_BUCKETS
+    }
+    for r in rows:
+        isp = classify_isp_from_domain(r.domain or "")
+        totals[isp]["sent"] += int(r.sent or 0)
+        totals[isp]["delivered"] += int(r.delivered or 0)
+    return totals
+
+
+@router.get(
+    "/stats/isp-reputation",
+    response_model=IspReputationOut,
+    dependencies=[Depends(require_api_key)],
+)
+async def get_isp_reputation(
+    tenant: str = Query(default="otto"),
+    db: AsyncSession = Depends(get_db),
+) -> IspReputationOut:
+    """Per-ISP reputation dashboard (SPEC_ADDENDUM §2.4).
+
+    `sent`/`delivered`/`delivery_rate` are computed from our own sends over
+    the last 7 days. `reputation`/`effective_daily_rate` come from CloudWatch
+    via the ESP adapter and are null whenever AWS creds/the managed pool are
+    unavailable — this endpoint never fails because of a CloudWatch outage.
+    """
+    totals = await _isp_send_totals(db, tenant)
+
+    adapter = get_esp_adapter()
+    sending_allowed: bool | None = None
+    dedicated_ip_count: int | None = None
+    cw_by_isp: dict[str, IspReputationMetric] = {}
+    try:
+        snapshot = await adapter.get_reputation()
+        sending_allowed = snapshot.managed_sending_allowed
+        if snapshot.managed_dedicated_ip_count is not None:
+            dedicated_ip_count = int(snapshot.managed_dedicated_ip_count)
+        for metric in snapshot.isp_metrics:
+            cw_by_isp[classify_isp_from_cloudwatch_label(metric.isp)] = metric
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("isp_reputation_cloudwatch_unavailable", error=str(exc))
+
+    isps = []
+    for isp in _ISP_BUCKETS:
+        sent = totals[isp]["sent"]
+        delivered = totals[isp]["delivered"]
+        cw_metric = cw_by_isp.get(isp)
+        isps.append(
+            IspReputationRow(
+                isp=isp,
+                reputation=cw_metric.reputation if cw_metric else None,
+                delivery_rate=_rate(delivered, sent) if sent else None,
+                sent=sent,
+                delivered=delivered,
+                effective_daily_rate=cw_metric.effective_daily_rate if cw_metric else None,
+            )
+        )
+
+    return IspReputationOut(
+        sending_allowed=sending_allowed,
+        dedicated_ip_count=dedicated_ip_count,
+        isps=isps,
     )

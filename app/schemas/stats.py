@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -68,3 +69,21 @@ class SESReputationOut(BaseModel):
     max_send_rate: float
     reputation_sending_enabled: bool | None
     fetched_at: datetime
+
+
+IspName = Literal["Gmail", "Yahoo", "Outlook", "Apple", "Other"]
+
+
+class IspReputationRow(BaseModel):
+    isp: IspName
+    reputation: float | None
+    delivery_rate: float | None
+    sent: int
+    delivered: int
+    effective_daily_rate: float | None
+
+
+class IspReputationOut(BaseModel):
+    sending_allowed: bool | None
+    dedicated_ip_count: int | None
+    isps: list[IspReputationRow]

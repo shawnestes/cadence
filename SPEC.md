@@ -30,7 +30,7 @@ A standalone Email Service Provider (ESP) for OTTO auto insurance remarketing. R
 | Scheduler | APScheduler | Matches Gauntlet |
 | DB | Aurora Postgres 15+ | User constraint, matches Gauntlet |
 | ORM | SQLAlchemy 2.x + Alembic | Standard |
-| ESP | AWS SES (boto3) | Starting point; abstract behind interface |
+| ESP | AWS SES (boto3), Managed Dedicated IPs | Starting point; abstract behind interface. See SPEC_ADDENDUM.md 001 |
 | AI | Anthropic Claude API (Sonnet for generation, Haiku for classification) | Matches existing tooling |
 | Frontend | React 18 + TypeScript + Vite + react-flow | react-flow is the standard for node-based builders |
 | Frontend styling | Tailwind + shadcn/ui | Fast iteration |
@@ -640,7 +640,7 @@ class ESPAdapter(ABC):
 ### 8.2 SES adapter (v1)
 
 - `send`: uses SES v2 `SendEmail` API. Configuration set name from config.
-- `get_reputation`: SES `GetAccountSendingEnabled` + CloudWatch metrics for bounce/complaint rates.
+- `get_reputation`: SES `GetAccountSendingEnabled` + CloudWatch metrics for bounce/complaint rates. Pulls per-ISP metrics from CloudWatch for the managed pool (`Reputation.IspFeedback`, `Managed.DedicatedIpCount`, `Managed.SendingAllowed`) — see SPEC_ADDENDUM.md 001 §2.4.
 - `parse_webhook`: validates SNS signature, parses Notification → list of events.
 - `add_to_esp_suppression`: uses SES account-level suppression list as second line of defense.
 
@@ -743,6 +743,11 @@ Single page, top-level metrics + drilldowns. Real-time via SSE (`/api/stats/stre
 - Account sending status
 - Daily quota usage
 
+**Per-ISP reputation (Managed Dedicated IPs — SPEC_ADDENDUM.md 001 §2.4):**
+- Per-ISP reputation gauges (Gmail, Yahoo, Outlook, Apple iCloud as minimum tiles)
+- Per-ISP delivery rate from our own `events` data, joined against the ISP reputation signal
+- Effective daily rate per top ISP from CloudWatch
+
 ### 11.3 Other screens
 
 - Campaign list + detail (variants, MAB stats, approve/reject/retire variants)
@@ -775,9 +780,10 @@ class Settings(BaseSettings):
 
     unsub_signing_key: str
     sns_topic_arn_ses_events: str
+    ses_managed_pool_name: str      # managed IP pool attached to the config set at infra setup
 
     workflow_tick_interval_seconds: int = 10
-    send_rate_limit_per_second: int = 14   # SES default account-level cap; tune per warmup phase
+    send_rate_limit_per_second: int = 14   # SES default account-level cap
     stats_refresh_interval_seconds: int = 300
 
     mab_min_explore_sends: int = 200
@@ -792,10 +798,9 @@ class Settings(BaseSettings):
 - Production starting quota: typically 50K/day, 14/sec — request increase before launch.
 - Send worker enforces per-second limit via token bucket in Postgres advisory lock or simple sleep loop.
 - Per-day quota tracked in DB; sends queue if quota exhausted, resume next day.
+- Per-recipient throttling: max 1 send per recipient per 24h.
 
-For **dedicated IP warmup**, build a `warmup_schedule` config:
-- Day 1: 50, Day 2: 100, Day 3: 500, Day 4: 1000, ramping by 2x daily until full volume
-- Send worker honors this cap during warmup window
+Dedicated IP warmup is handled by **SES Managed Dedicated IPs** (SPEC_ADDENDUM.md 001) — SES warms per-ISP adaptively and spills to the shared pool during ramp. No warmup schedule, per-day warmup caps, or IP selection logic in the send worker.
 
 ---
 
@@ -809,6 +814,9 @@ For **dedicated IP warmup**, build a `warmup_schedule` config:
   - `esp_workflow_tick_duration_seconds`
   - `esp_ai_generation_duration_seconds`
   - `esp_otto_sync_failures_total`
+  - Per-ISP reputation from CloudWatch (`Reputation.IspFeedback`)
+  - `Managed.DedicatedIpCount` (managed pool IP count — ops signal for volume growth)
+  - `Managed.SendingAllowed` (managed pool health)
 - Tracing: OpenTelemetry, optional for v1 but instrument send + tick paths.
 - Alerts (Slack via webhook):
   - Bounce rate > 3% over 1h
@@ -891,7 +899,7 @@ Use `pytest` + `pytest-asyncio` + `httpx` for API tests + `factory_boy` for fixt
 - Suppression list UI
 
 ### Milestone 6: Production hardening (week 12)
-- IP warmup schedule enforcement
+- SES Managed Dedicated IP pool integration (no manual warmup — SPEC_ADDENDUM.md 001)
 - Reputation monitoring + alerts
 - Load test to 1M/mo throughput
 - Deployment automation

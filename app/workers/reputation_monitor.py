@@ -18,6 +18,7 @@ from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.alerts import AlertDispatcher, AlertEvent, get_alert_dispatcher
+from app.adapters.esp.factory import get_esp_adapter
 from app.api.stats import _compute_topline
 from app.core.config import get_settings
 from app.core.db import async_session_factory
@@ -27,6 +28,12 @@ from app.models.base import uuid7
 log = structlog.get_logger(__name__)
 
 _METRICS = ("bounce_rate", "complaint_rate")
+
+# Binary metric: 1.0 when the managed IP pool has stopped sending, 0.0 when
+# healthy. Warn and critical are the same threshold — there's no "partial"
+# state, Managed.SendingAllowed is either true or false.
+_MANAGED_POOL_METRIC = "managed_sending_allowed"
+_MANAGED_POOL_THRESHOLD = 0.5
 
 
 def _thresholds(metric: str) -> tuple[float, float]:
@@ -56,6 +63,27 @@ async def _run_tenant_metric(
     topline = await _compute_topline(db, tenant, s.alert_eval_window)
     value = _get_value(topline, metric)
 
+    await _apply_alert_state(
+        db, tenant, metric, value, warn_thresh, critical_thresh, dispatcher, now
+    )
+
+
+async def _apply_alert_state(
+    db: AsyncSession,
+    tenant: str,
+    metric: str,
+    value: float,
+    warn_thresh: float,
+    critical_thresh: float,
+    dispatcher: AlertDispatcher,
+    now: datetime,
+) -> None:
+    """Evaluate one tenant+metric value against thresholds and advance its
+    alert lifecycle (pending → active → resolved). Shared by both the
+    DB-derived metrics (bounce/complaint rate) and the CloudWatch-derived
+    managed-pool health check.
+    """
+    s = get_settings()
     if value >= critical_thresh:
         severity = "critical"
         threshold = critical_thresh
@@ -199,6 +227,43 @@ async def _run_tenant_metric(
         )
 
 
+async def _run_tenant_managed_pool(
+    db: AsyncSession,
+    tenant: str,
+    dispatcher: AlertDispatcher,
+    now: datetime,
+) -> None:
+    """Alert when SES reports the managed dedicated IP pool has stopped
+    sending (`Managed.SendingAllowed=False`, addendum §2.4). No pool
+    configured, or CloudWatch unreachable/no creds → skip silently, no crash.
+    """
+    s = get_settings()
+    if not s.ses_managed_pool_name:
+        return
+
+    adapter = get_esp_adapter()
+    try:
+        snapshot = await adapter.get_reputation()
+    except Exception:  # noqa: BLE001
+        log.warning("reputation_monitor.managed_pool_fetch_failed", tenant=tenant)
+        return
+
+    if snapshot.managed_sending_allowed is None:
+        return
+
+    value = 0.0 if snapshot.managed_sending_allowed else 1.0
+    await _apply_alert_state(
+        db,
+        tenant,
+        _MANAGED_POOL_METRIC,
+        value,
+        _MANAGED_POOL_THRESHOLD,
+        _MANAGED_POOL_THRESHOLD,
+        dispatcher,
+        now,
+    )
+
+
 async def run_once(dispatcher: AlertDispatcher | None = None) -> None:
     s = get_settings()
     if dispatcher is None:
@@ -217,3 +282,13 @@ async def run_once(dispatcher: AlertDispatcher | None = None) -> None:
                     tenant=tenant,
                     metric=metric,
                 )
+
+        try:
+            async with async_session_factory() as db:
+                await _run_tenant_managed_pool(db, tenant, dispatcher, now)
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "reputation_monitor.error",
+                tenant=tenant,
+                metric=_MANAGED_POOL_METRIC,
+            )
