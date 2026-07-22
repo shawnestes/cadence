@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.db import get_db
 from app.domain.workflow_defs import WorkflowDefinition
 from app.models.workflow import Workflow
+from app.models.workflow_version import WorkflowVersion
 from app.schemas.workflow import (
     WorkflowIn,
     WorkflowListOut,
@@ -41,10 +42,19 @@ async def create_workflow(
         entry_segment=payload.entry_segment,
         version=1,
         created_by=payload.created_by,
+        reentry_cooldown=payload.reentry_cooldown,
     )
     db.add(row)
     await db.commit()
     await db.refresh(row)
+    db.add(
+        WorkflowVersion(
+            workflow_id=row.id,
+            version=row.version,
+            definition=row.definition,
+        )
+    )
+    await db.commit()
     return WorkflowOut.model_validate(row)
 
 
@@ -120,10 +130,14 @@ async def update_workflow(
         row.name = payload.name
     if payload.entry_segment is not None:
         row.entry_segment = payload.entry_segment
+    if payload.reentry_cooldown is not None:
+        row.reentry_cooldown = payload.reentry_cooldown
+    definition_changed = False
     if payload.definition is not None:
         _validate_or_400(payload.definition)
         row.definition = payload.definition.model_dump()
         row.version = row.version + 1
+        definition_changed = True
     if payload.status is not None:
         if payload.status == "active":
             wd = WorkflowDefinition.model_validate(row.definition)
@@ -132,6 +146,15 @@ async def update_workflow(
 
     await db.commit()
     await db.refresh(row)
+    if definition_changed:
+        db.add(
+            WorkflowVersion(
+                workflow_id=row.id,
+                version=row.version,
+                definition=row.definition,
+            )
+        )
+        await db.commit()
     return WorkflowOut.model_validate(row)
 
 

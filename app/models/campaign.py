@@ -22,6 +22,7 @@ class Campaign(Base, TimestampMixin):
     mab_config: Mapped[dict] = mapped_column(
         JSONB,
         nullable=False,
+        default=lambda: {"algo": "thompson", "explore_pct": 0.1},
         server_default=text(r"""'{"algo":"thompson","explore_pct"\:0.1}'::jsonb"""),
     )
 

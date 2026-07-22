@@ -20,7 +20,12 @@ class Recipient(Base, TimestampMixin):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     consent_source: Mapped[str] = mapped_column(Text, nullable=False)
     consent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    attributes: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    attributes: Mapped[dict] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'active'"))
 
     __table_args__ = (

@@ -5,11 +5,11 @@ Per SPEC §6.4 (tick loop), §6.6 (global exits, branch conditions, re-entry).
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import structlog
-from sqlalchemy import and_, select, text
+from sqlalchemy import and_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.esp.factory import get_esp_adapter
@@ -33,6 +33,7 @@ from app.models.recipient import Recipient
 from app.models.send import Send
 from app.models.template import Template
 from app.models.workflow import Workflow
+from app.models.workflow_version import WorkflowVersion
 
 log = structlog.get_logger(__name__)
 
@@ -47,17 +48,46 @@ async def run_once() -> dict[str, int]:
 
     now = datetime.now(timezone.utc)
 
+    # Phase 1: lock a batch of due journeys and push their next_action_at
+    # forward into a claimed window so a concurrent tick can't re-pick them
+    # while this tick iterates. Commit to release the row locks; per-row
+    # processing then runs in its own transaction.
+    claim_until = now + timedelta(minutes=5)
     async with async_session_factory() as session:
         stmt = (
-            select(Journey)
+            select(Journey.id)
             .where(Journey.status == "active")
             .where((Journey.next_action_at.is_(None)) | (Journey.next_action_at <= now))
             .order_by(Journey.next_action_at.asc().nulls_first())
             .limit(1000)
             .with_for_update(skip_locked=True)
         )
-        result = await session.execute(stmt)
-        journeys = list(result.scalars().all())
+        ids = list((await session.execute(stmt)).scalars().all())
+        if not ids:
+            return {
+                "processed": 0,
+                "advanced": 0,
+                "exited_global": 0,
+                "errored": 0,
+            }
+        await session.execute(
+            update(Journey)
+            .where(Journey.id.in_(ids))
+            .values(next_action_at=claim_until)
+        )
+        await session.commit()
+
+    # Phase 2: reload the claimed journeys and process each.
+    async with async_session_factory() as session:
+        journeys = list(
+            (
+                await session.execute(
+                    select(Journey).where(Journey.id.in_(ids))
+                )
+            )
+            .scalars()
+            .all()
+        )
 
         for journey in journeys:
             processed += 1
@@ -88,9 +118,10 @@ async def run_once() -> dict[str, int]:
                     log.warning("workflow_tick.workflow_missing", **log_ctx)
                     continue
 
-                # TODO(M3.1+): snapshot workflow.definition by version; for now we
-                # always use the current workflow definition even if
-                # workflow.version != journey.workflow_version.
+                # Pin the definition to the journey's workflow_version
+                # (SPEC §6.5 workflow_version pinning). Fall back to current
+                # workflow.definition if the snapshot isn't present (older
+                # rows pre-dating the workflow_versions table).
                 if workflow.status in {"paused", "archived"}:
                     journey.status = "exited"
                     journey.completed_at = now
@@ -104,7 +135,17 @@ async def run_once() -> dict[str, int]:
                     )
                     continue
 
-                definition = WorkflowDefinition.model_validate(workflow.definition)
+                pinned_def = (
+                    await session.execute(
+                        select(WorkflowVersion.definition)
+                        .where(WorkflowVersion.workflow_id == workflow.id)
+                        .where(WorkflowVersion.version == journey.workflow_version)
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                definition = WorkflowDefinition.model_validate(
+                    pinned_def if pinned_def is not None else workflow.definition
+                )
                 node = definition.nodes.get(journey.current_node_id)
                 if node is None:
                     journey.status = "errored"

@@ -135,10 +135,18 @@ async def send_campaign(
     if campaign is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
 
+    MAX_INPUTS = 10_000
+    BATCH_SIZE = 500
+
     skipped_not_found = 0
     recipients: list[Recipient] = []
 
     if payload.recipient_ids:
+        if len(payload.recipient_ids) > MAX_INPUTS:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"recipient_ids exceeds {MAX_INPUTS}",
+            )
         rows = (
             await db.execute(
                 select(Recipient)
@@ -150,16 +158,24 @@ async def send_campaign(
         skipped_not_found = len([rid for rid in payload.recipient_ids if rid not in found_ids])
         recipients = list(rows)
     elif payload.email_list:
+        if len(payload.email_list) > MAX_INPUTS:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"email_list exceeds {MAX_INPUTS}",
+            )
+        # Emails are stored lowercased at ingest; citext handles case but we
+        # still normalize the input so membership checks line up.
+        normalized_emails = [e.lower() for e in payload.email_list]
         rows = (
             await db.execute(
                 select(Recipient)
                 .where(Recipient.tenant == payload.tenant)
-                .where(Recipient.email.in_(payload.email_list))
+                .where(Recipient.email.in_(normalized_emails))
             )
         ).scalars().all()
         found_emails = {r.email.lower() for r in rows}
         skipped_not_found = len(
-            [e for e in payload.email_list if e.lower() not in found_emails]
+            [e for e in normalized_emails if e not in found_emails]
         )
         recipients = list(rows)
     else:
@@ -174,15 +190,30 @@ async def send_campaign(
     queued = 0
     skipped_no_template = 0
 
-    for r in recipients:
-        cohort_key = r.vertical
-        template = await pick_variant(
-            db, tenant=campaign.tenant, campaign_id=campaign.id, cohort_key=cohort_key
+    # Preload the approved template set for this campaign once instead of
+    # hitting the DB inside the per-recipient loop. pick_variant still runs
+    # per-recipient for MAB Thompson sampling, but the in-memory variant
+    # set means each call does at most one index lookup for stats.
+    cohort_keys = {r.vertical for r in recipients} | {None}
+    template_cache: dict[tuple[str | None], object] = {}
+    for ck in cohort_keys:
+        tmpl = await pick_variant(
+            db, tenant=campaign.tenant, campaign_id=campaign.id, cohort_key=ck
         )
+        template_cache[(ck,)] = tmpl
+
+    for i, r in enumerate(recipients, start=1):
+        template = template_cache.get((r.vertical,)) or template_cache.get((None,))
         if template is None:
+            # Last-chance per-recipient resolution (MAB-driven) in case the
+            # preloaded cache missed because of a cohort not seen above.
             template = await pick_variant(
-                db, tenant=campaign.tenant, campaign_id=campaign.id, cohort_key=None
+                db, tenant=campaign.tenant, campaign_id=campaign.id, cohort_key=r.vertical
             )
+            if template is None:
+                template = await pick_variant(
+                    db, tenant=campaign.tenant, campaign_id=campaign.id, cohort_key=None
+                )
         if template is None:
             skipped_no_template += 1
             continue
@@ -201,6 +232,8 @@ async def send_campaign(
             )
         )
         queued += 1
+        if i % BATCH_SIZE == 0:
+            await db.commit()
     await db.commit()
 
     return CampaignSendResult(
