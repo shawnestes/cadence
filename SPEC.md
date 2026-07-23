@@ -214,6 +214,24 @@ campaigns (
   cohort_filter   jsonb,            -- which recipient attrs define cohorts
   ai_brief        text,             -- prompt context for AI generation
   mab_config      jsonb NOT NULL,   -- {algo: 'thompson', explore_pct: 0.1}
+  sending_identity_id uuid REFERENCES sending_identities(id), -- addendum 003; NULL = tenant default
+  created_at      timestamptz NOT NULL,
+  updated_at      timestamptz NOT NULL
+);
+
+-- Sending identities = which ESP/domain/account a send goes out as (addendum 003).
+sending_identities (
+  id              uuid PK,
+  tenant          text NOT NULL,
+  name            text NOT NULL,             -- UNIQUE per tenant
+  esp_provider    text NOT NULL,             -- 'ses' | 'sendgrid' | 'expertsender' | 'noop'
+  from_address    text NOT NULL,
+  sending_domain  text NOT NULL,
+  credentials_ref text,                      -- env/Secrets Manager ref; never raw secrets
+  provider_config jsonb NOT NULL DEFAULT '{}',
+  daily_quota     int NOT NULL DEFAULT 50000,
+  status          text NOT NULL DEFAULT 'active',  -- active|paused
+  is_default      boolean NOT NULL DEFAULT false,  -- one per tenant (partial unique index)
   created_at      timestamptz NOT NULL,
   updated_at      timestamptz NOT NULL
 );
@@ -244,8 +262,9 @@ sends (
   recipient_id    uuid NOT NULL REFERENCES recipients(id),
   cohort_key      text NOT NULL,
   variant_label   text NOT NULL,
-  esp             text NOT NULL,    -- 'ses'
-  esp_message_id  text,             -- SES messageId for webhook joining
+  esp             text NOT NULL,    -- provider name ('ses', 'sendgrid', ...)
+  esp_message_id  text,             -- provider messageId for webhook joining
+  sending_identity_id uuid REFERENCES sending_identities(id), -- addendum 003; stamped at queue time
   rendered_subject text NOT NULL,   -- post-merge, for audit
   status          text NOT NULL,    -- queued|sent|delivered|bounced|complained|failed
   queued_at       timestamptz NOT NULL,
@@ -644,6 +663,15 @@ class ESPAdapter(ABC):
     async def add_to_esp_suppression(self, email: str, reason: str) -> None: ...
 ```
 
+> **Sending identities (SPEC_ADDENDUM_003):** the adapter factory is
+> per-identity — `get_esp_adapter(identity)` returns a cached adapter for the
+> identity's `esp_provider`, configured from its `provider_config`. Settings
+> seed only the migration-created default identity. Adapters may leave
+> capability gaps (empty reputation, no-op suppression) per provider. Daily
+> quota is tracked per identity, account-grouped for SES; per-identity
+> reputation alerts. Compliance (suppression, caps, quiet hours) stays global
+> per recipient across identities.
+
 ### 8.2 SES adapter (v1)
 
 - `send`: uses SES v2 `SendEmail` API. Configuration set name from config.
@@ -947,7 +975,7 @@ Use `pytest` + `pytest-asyncio` + `httpx` for API tests + `factory_boy` for fixt
 To prevent scope creep — these are deferred to v2+:
 
 - Multi-tenant isolation (Giraffe support)
-- Multi-ESP failover or routing
+- Multi-ESP failover (routing shipped via SPEC_ADDENDUM_003 sending identities; automatic failover still deferred)
 - Per-recipient AI generation (cohort-level only)
 - Send-time optimization
 - A/B test framework outside MAB
