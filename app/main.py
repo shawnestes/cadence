@@ -11,6 +11,7 @@ from app.api import (
     metrics,
     recipients,
     segments,
+    sending_identities,
     stats,
     suppressions,
     templates,
@@ -79,6 +80,11 @@ app.include_router(
 )
 app.include_router(
     segments.router,
+    prefix="/api",
+    dependencies=[Depends(require_api_key)],
+)
+app.include_router(
+    sending_identities.router,
     prefix="/api",
     dependencies=[Depends(require_api_key)],
 )

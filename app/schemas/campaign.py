@@ -14,6 +14,7 @@ class CampaignIn(BaseModel):
     vertical: str
     workflow_id: UUID | None = None
     node_id: str | None = None
+    sending_identity_id: UUID | None = None
     cohort_filter: dict | None = None
     ai_brief: str | None = None
     mab_config: dict = Field(default_factory=lambda: {"algo": "thompson", "explore_pct": 0.1})
@@ -22,6 +23,7 @@ class CampaignIn(BaseModel):
 class CampaignUpdate(BaseModel):
     name: str | None = None
     status: CampaignStatus | None = None
+    sending_identity_id: UUID | None = None
     cohort_filter: dict | None = None
     ai_brief: str | None = None
     mab_config: dict | None = None
@@ -37,6 +39,7 @@ class CampaignOut(BaseModel):
     name: str
     vertical: str
     status: str
+    sending_identity_id: UUID | None
     cohort_filter: dict | None
     ai_brief: str | None
     mab_config: dict
