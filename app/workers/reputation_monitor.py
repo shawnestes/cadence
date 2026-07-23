@@ -24,6 +24,7 @@ from app.core.config import get_settings
 from app.core.db import async_session_factory
 from app.models.alert import Alert
 from app.models.base import uuid7
+from app.models.sending_identity import SendingIdentity
 
 log = structlog.get_logger(__name__)
 
@@ -233,35 +234,52 @@ async def _run_tenant_managed_pool(
     dispatcher: AlertDispatcher,
     now: datetime,
 ) -> None:
-    """Alert when SES reports the managed dedicated IP pool has stopped
-    sending (`Managed.SendingAllowed=False`, addendum §2.4). No pool
-    configured, or CloudWatch unreachable/no creds → skip silently, no crash.
+    """Per-identity managed dedicated IP pool health check (SPEC_ADDENDUM_003
+    §7). Alerts when SES reports a managed pool has stopped sending
+    (`Managed.SendingAllowed=False`, addendum 001 §2.4).
+
+    Iterates every active SES sending identity for the tenant and runs the
+    check through that identity's own adapter, so each identity gets its own
+    alert lifecycle (namespaced by identity name — `Alert` has no
+    `sending_identity_id` column, so the metric string itself disambiguates
+    identities sharing a tenant). An identity with no managed pool configured,
+    or unreachable CloudWatch/no creds, contributes nothing — skipped
+    silently, never crashes the tick.
     """
-    s = get_settings()
-    if not s.ses_managed_pool_name:
-        return
-
-    adapter = get_esp_adapter()
-    try:
-        snapshot = await adapter.get_reputation()
-    except Exception:  # noqa: BLE001
-        log.warning("reputation_monitor.managed_pool_fetch_failed", tenant=tenant)
-        return
-
-    if snapshot.managed_sending_allowed is None:
-        return
-
-    value = 0.0 if snapshot.managed_sending_allowed else 1.0
-    await _apply_alert_state(
-        db,
-        tenant,
-        _MANAGED_POOL_METRIC,
-        value,
-        _MANAGED_POOL_THRESHOLD,
-        _MANAGED_POOL_THRESHOLD,
-        dispatcher,
-        now,
+    stmt = select(SendingIdentity).where(
+        SendingIdentity.tenant == tenant,
+        SendingIdentity.status == "active",
+        SendingIdentity.esp_provider == "ses",
     )
+    identities = (await db.execute(stmt)).scalars().all()
+
+    for identity in identities:
+        adapter = get_esp_adapter(identity)
+        try:
+            snapshot = await adapter.get_reputation()
+        except Exception:  # noqa: BLE001
+            log.warning(
+                "reputation_monitor.managed_pool_fetch_failed",
+                tenant=tenant,
+                identity=identity.name,
+            )
+            continue
+
+        if snapshot.managed_sending_allowed is None:
+            continue
+
+        value = 0.0 if snapshot.managed_sending_allowed else 1.0
+        metric = f"{_MANAGED_POOL_METRIC}:{identity.name}"
+        await _apply_alert_state(
+            db,
+            tenant,
+            metric,
+            value,
+            _MANAGED_POOL_THRESHOLD,
+            _MANAGED_POOL_THRESHOLD,
+            dispatcher,
+            now,
+        )
 
 
 async def run_once(dispatcher: AlertDispatcher | None = None) -> None:

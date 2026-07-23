@@ -11,8 +11,10 @@ from sqlalchemy import select
 from app.core.db import async_session_factory
 from app.models.recipient import Recipient
 from app.models.send import Send
+from app.models.sending_identity import SendingIdentity
 from app.models.suppression import Suppression
 from app.models.unsub_outbox import UnsubOutbox
+from tests._identity_helpers import create_identity
 
 
 async def _fresh_read(stmt):
@@ -69,7 +71,10 @@ async def _seed_campaign_template(db_session):
 
 
 async def _seed_send(
-    db_session, recipient: Recipient, esp_message_id: str
+    db_session,
+    recipient: Recipient,
+    esp_message_id: str,
+    sending_identity_id: uuid.UUID | None = None,
 ) -> Send:
     c, t = await _seed_campaign_template(db_session)
     now = datetime.now(timezone.utc)
@@ -82,6 +87,7 @@ async def _seed_send(
         variant_label=t.variant_label,
         esp="noop",
         esp_message_id=esp_message_id,
+        sending_identity_id=sending_identity_id,
         rendered_subject="Hi",
         status="sent",
         queued_at=now,
@@ -185,3 +191,67 @@ async def test_malformed_body_returns_200(client):
         headers={"content-type": "application/json"},
     )
     assert resp.status_code == 200
+
+
+async def test_attribution_mismatch_logs_but_trusts_send_row(client, db_session, caplog):
+    """SPEC_ADDENDUM_003 §6: attribution is telemetry only. When the webhook
+    payload's configuration set maps to a different identity than the one
+    recorded on the send row, we log a warning but still process the event
+    against the send row's own identity — nothing about the send/event is
+    changed because of the mismatch.
+    """
+    identity_a = await create_identity(db_session)
+    identity_a.provider_config = {"configuration_set": f"test-config-a-{uuid.uuid4()}"}
+    identity_b = await create_identity(db_session)
+    identity_b.provider_config = {"configuration_set": f"test-config-b-{uuid.uuid4()}"}
+    db_session.add_all([identity_a, identity_b])
+    await db_session.commit()
+    await db_session.refresh(identity_a)
+    await db_session.refresh(identity_b)
+
+    try:
+        email = f"test-{uuid.uuid4()}@cadencetests.io"
+        r = await _seed_recipient(db_session, email)
+        msg_id = f"noop-{uuid.uuid4()}"
+        s = await _seed_send(db_session, r, msg_id, sending_identity_id=identity_a.id)
+
+        payload = _payload("delivery", email, msg_id)
+        # NoopESP.parse_webhook stores the raw posted dict verbatim, so a flat
+        # `configurationSetName` key exercises the fallback shape in
+        # _extract_configuration_set — claiming identity_b's config set even
+        # though the send row was dispatched under identity_a.
+        payload["configurationSetName"] = identity_b.provider_config["configuration_set"]
+
+        with caplog.at_level("WARNING"):
+            resp = await client.post("/webhooks/ses", json=payload)
+        assert resp.status_code == 200
+
+        assert "webhook.identity_attribution_mismatch" in caplog.text
+        assert str(identity_a.id) in caplog.text
+        assert str(identity_b.id) in caplog.text
+
+        # Send row is trusted: event still lands against send/identity_a,
+        # nothing about sending_identity_id is rewritten from the payload.
+        refreshed = await _fresh_read(select(Send).where(Send.id == s.id))
+        assert refreshed.status == "delivered"
+        assert refreshed.sending_identity_id == identity_a.id
+    finally:
+        # The webhook created an events row against this send, and Send FKs
+        # to sending_identities; the autouse test-row purge in conftest runs
+        # after this test returns, so unwind that chain ourselves first or
+        # the identity delete below trips an FK constraint.
+        async with async_session_factory() as cleanup:
+            from sqlalchemy import text as sa_text
+
+            await cleanup.execute(
+                sa_text("DELETE FROM events WHERE send_id = :send_id"),
+                {"send_id": s.id},
+            )
+            send_obj = await cleanup.get(Send, s.id)
+            if send_obj is not None:
+                await cleanup.delete(send_obj)
+            for identity_id in (identity_a.id, identity_b.id):
+                obj = await cleanup.get(SendingIdentity, identity_id)
+                if obj is not None:
+                    await cleanup.delete(obj)
+            await cleanup.commit()

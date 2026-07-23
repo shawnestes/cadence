@@ -11,12 +11,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.esp import ses as ses_mod
+from app.adapters.esp.base import ParsedEvent
 from app.adapters.esp.factory import get_esp_adapter
 from app.core.db import get_db
 from app.models.base import uuid7
 from app.models.event import Event
 from app.models.recipient import Recipient
 from app.models.send import Send
+from app.models.sending_identity import SendingIdentity
 from app.models.suppression import Suppression
 from app.models.unsub_outbox import UnsubOutbox
 
@@ -77,50 +79,85 @@ async def _auto_confirm_subscription(payload: dict) -> None:
     logger.info("webhook.subscription_confirmed", topic_arn=topic_arn)
 
 
-@router.post("/webhooks/ses", status_code=status.HTTP_200_OK)
-async def ses_webhook(
-    request: Request,
-    x_amz_sns_message_type: str | None = Header(None, alias="x-amz-sns-message-type"),
-    db: AsyncSession = Depends(get_db),
-) -> Response:
-    body = await request.body()
-    try:
-        payload = json.loads(body.decode() or "{}")
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        logger.warning("webhook.malformed_body", error=str(exc))
-        return Response(status_code=200)
+def _extract_configuration_set(raw: dict) -> str | None:
+    """Best-effort SES configuration-set name from a parsed event's raw payload.
 
-    msg_type = payload.get("Type") or x_amz_sns_message_type
+    Real SES event JSON nests it at ``mail.tags["ses:configuration-set"][0]``.
+    Some payloads (older events, synthetic test fixtures) carry it flat as
+    ``configurationSetName`` instead. Neither shape present just means this
+    event predates identity tagging, or came from an adapter that doesn't tag
+    at all (e.g. NoopESP) — callers must treat that as "nothing to attribute",
+    not an error.
+    """
+    mail = raw.get("mail")
+    if isinstance(mail, dict):
+        tags = mail.get("tags")
+        if isinstance(tags, dict):
+            values = tags.get("ses:configuration-set")
+            if isinstance(values, list) and values and isinstance(values[0], str):
+                return values[0]
 
-    if msg_type == "SubscriptionConfirmation":
-        logger.info(
-            "webhook.subscription_confirmation_received",
-            topic_arn=payload.get("TopicArn"),
-            subscribe_url=payload.get("SubscribeURL"),
+    flat = raw.get("configurationSetName")
+    if isinstance(flat, str) and flat:
+        return flat
+
+    return None
+
+
+async def _resolve_configured_identity(
+    db: AsyncSession, configuration_set: str
+) -> SendingIdentity | None:
+    """Look up the sending identity whose provider_config advertises this
+    configuration set, for attribution telemetry only (SPEC_ADDENDUM_003 §6).
+    """
+    result = await db.execute(
+        select(SendingIdentity).where(
+            SendingIdentity.provider_config["configuration_set"].astext
+            == configuration_set
         )
-        await _auto_confirm_subscription(payload)
-        return Response(status_code=200)
+    )
+    return result.scalars().first()
 
-    if msg_type == "UnsubscribeConfirmation":
-        logger.info("webhook.unsubscribe_confirmation", topic_arn=payload.get("TopicArn"))
-        return Response(status_code=200)
 
-    if msg_type and msg_type != "Notification":
-        logger.info("webhook.unknown_sns_type", type=msg_type)
-        return Response(status_code=200)
+async def _check_identity_attribution(
+    db: AsyncSession, evt: ParsedEvent, send: Send | None
+) -> None:
+    """Cross-check the webhook payload's configuration set against the send
+    row's recorded sending identity. Telemetry/logging only — nothing is
+    stored, and the send row is always trusted over the payload on mismatch.
+    """
+    configuration_set = _extract_configuration_set(evt.raw)
+    if not configuration_set:
+        return  # older event or an adapter that doesn't tag; skip silently
 
-    try:
-        adapter = get_esp_adapter()
-        # parse_webhook may synchronously fetch/cache an SNS signing cert over
-        # HTTPS on a cache miss; run it off the event loop so a slow/hanging
-        # fetch can't block other requests for up to 5s.
-        events = await asyncio.to_thread(
-            adapter.parse_webhook, payload, payload.get("Signature")
+    if send is None or send.sending_identity_id is None:
+        return  # nothing on our side to cross-check against
+
+    configured_identity = await _resolve_configured_identity(db, configuration_set)
+    if configured_identity is None:
+        return  # config set doesn't map to any known identity
+
+    if configured_identity.id != send.sending_identity_id:
+        logger.warning(
+            "webhook.identity_attribution_mismatch",
+            esp_message_id=evt.esp_message_id,
+            configuration_set=configuration_set,
+            payload_identity_id=str(configured_identity.id),
+            send_identity_id=str(send.sending_identity_id),
         )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("webhook.parse_failed", error=str(exc))
-        return Response(status_code=200)
 
+
+async def _ingest_parsed_events(
+    db: AsyncSession, events: list[ParsedEvent], esp_name: str
+) -> None:
+    """Write a provider's parsed webhook events to the DB.
+
+    Handles the events insert, send status update, suppression on
+    bounce/complaint, and unsub outbox — provider-agnostic so a future
+    ``/webhooks/sendgrid`` route can reuse it without duplicating this logic.
+    Commits once at the end, mirroring the prior single-commit behavior of
+    ``ses_webhook``.
+    """
     for evt in events:
         send: Send | None = None
         if evt.esp_message_id:
@@ -128,6 +165,8 @@ async def ses_webhook(
                 select(Send).where(Send.esp_message_id == evt.esp_message_id)
             )
             send = result.scalar_one_or_none()
+
+        await _check_identity_attribution(db, evt, send)
 
         tenant = send.tenant if send else DEFAULT_TENANT
         recipient: Recipient | None = None
@@ -230,4 +269,51 @@ async def ses_webhook(
                 recipient.status = new_recipient_status
 
     await db.commit()
+
+
+@router.post("/webhooks/ses", status_code=status.HTTP_200_OK)
+async def ses_webhook(
+    request: Request,
+    x_amz_sns_message_type: str | None = Header(None, alias="x-amz-sns-message-type"),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    body = await request.body()
+    try:
+        payload = json.loads(body.decode() or "{}")
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        logger.warning("webhook.malformed_body", error=str(exc))
+        return Response(status_code=200)
+
+    msg_type = payload.get("Type") or x_amz_sns_message_type
+
+    if msg_type == "SubscriptionConfirmation":
+        logger.info(
+            "webhook.subscription_confirmation_received",
+            topic_arn=payload.get("TopicArn"),
+            subscribe_url=payload.get("SubscribeURL"),
+        )
+        await _auto_confirm_subscription(payload)
+        return Response(status_code=200)
+
+    if msg_type == "UnsubscribeConfirmation":
+        logger.info("webhook.unsubscribe_confirmation", topic_arn=payload.get("TopicArn"))
+        return Response(status_code=200)
+
+    if msg_type and msg_type != "Notification":
+        logger.info("webhook.unknown_sns_type", type=msg_type)
+        return Response(status_code=200)
+
+    try:
+        adapter = get_esp_adapter()
+        # parse_webhook may synchronously fetch/cache an SNS signing cert over
+        # HTTPS on a cache miss; run it off the event loop so a slow/hanging
+        # fetch can't block other requests for up to 5s.
+        events = await asyncio.to_thread(
+            adapter.parse_webhook, payload, payload.get("Signature")
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("webhook.parse_failed", error=str(exc))
+        return Response(status_code=200)
+
+    await _ingest_parsed_events(db, events, adapter.name)
     return Response(status_code=200)

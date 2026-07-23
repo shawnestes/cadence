@@ -1,6 +1,7 @@
 import asyncio
 import json
 import secrets
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
@@ -22,6 +23,7 @@ from app.models.campaign import Campaign
 from app.models.event import Event
 from app.models.recipient import Recipient
 from app.models.send import Send
+from app.models.sending_identity import SendingIdentity
 from app.schemas.stats import (
     CampaignVolumeRow,
     CampaignsVolumeOut,
@@ -33,6 +35,7 @@ from app.schemas.stats import (
     TimeseriesPoint,
     ToplineWindow,
 )
+from app.services.sending_identity import get_identity
 
 logger = structlog.get_logger(__name__)
 
@@ -355,12 +358,15 @@ async def get_ses_reputation(
     )
 
 
-async def _isp_send_totals(db: AsyncSession, tenant: str) -> dict[str, dict[str, int]]:
+async def _isp_send_totals(
+    db: AsyncSession, tenant: str, identity_id: uuid.UUID | None = None
+) -> dict[str, dict[str, int]]:
     """DB-derived sent/delivered counts over the last 7 days, bucketed by ISP.
 
     Buckets are derived from the recipient's email domain via
     `classify_isp_from_domain` (app/domain/isp.py — pure, no DB/HTTP
-    dependency of its own).
+    dependency of its own). When `identity_id` is given, only sends
+    dispatched under that sending identity are counted (SPEC_ADDENDUM_003 §7).
     """
     start = _window_start(_ISP_REPUTATION_WINDOW)
     domain_col = func.lower(func.split_part(Recipient.email, "@", 2)).label("domain")
@@ -377,6 +383,8 @@ async def _isp_send_totals(db: AsyncSession, tenant: str) -> dict[str, dict[str,
         .where(Send.tenant == tenant, Send.queued_at >= start)
         .group_by(domain_col)
     )
+    if identity_id is not None:
+        q = q.where(Send.sending_identity_id == identity_id)
     rows = (await db.execute(q)).all()
 
     totals: dict[str, dict[str, int]] = {
@@ -396,18 +404,26 @@ async def _isp_send_totals(db: AsyncSession, tenant: str) -> dict[str, dict[str,
 )
 async def get_isp_reputation(
     tenant: str = Query(default="otto"),
+    identity_id: uuid.UUID | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
 ) -> IspReputationOut:
-    """Per-ISP reputation dashboard (SPEC_ADDENDUM §2.4).
+    """Per-ISP reputation dashboard (SPEC_ADDENDUM §2.4, identity filter per
+    SPEC_ADDENDUM_003 §7).
 
     `sent`/`delivered`/`delivery_rate` are computed from our own sends over
     the last 7 days. `reputation`/`effective_daily_rate` come from CloudWatch
     via the ESP adapter and are null whenever AWS creds/the managed pool are
     unavailable — this endpoint never fails because of a CloudWatch outage.
+    When `identity_id` is given, DB totals are scoped to that identity's
+    sends and CloudWatch is pulled through that identity's adapter.
     """
-    totals = await _isp_send_totals(db, tenant)
+    totals = await _isp_send_totals(db, tenant, identity_id)
 
-    adapter = get_esp_adapter()
+    identity: SendingIdentity | None = None
+    if identity_id is not None:
+        identity = await get_identity(db, identity_id)
+
+    adapter = get_esp_adapter(identity)
     sending_allowed: bool | None = None
     dedicated_ip_count: int | None = None
     cw_by_isp: dict[str, IspReputationMetric] = {}
@@ -441,4 +457,5 @@ async def get_isp_reputation(
         sending_allowed=sending_allowed,
         dedicated_ip_count=dedicated_ip_count,
         isps=isps,
+        identity_id=str(identity.id) if identity is not None else None,
     )

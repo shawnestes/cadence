@@ -23,7 +23,9 @@ from app.core.db import async_session_factory
 from app.models.campaign import Campaign
 from app.models.recipient import Recipient
 from app.models.send import Send
+from app.models.sending_identity import SendingIdentity
 from app.models.template import Template
+from tests._identity_helpers import create_identity
 
 
 class _FakeAdapter:
@@ -82,7 +84,14 @@ async def _seed_recipient(db_session, email: str) -> Recipient:
     return r
 
 
-async def _seed_send(db_session, recipient, campaign, template, status: str) -> Send:
+async def _seed_send(
+    db_session,
+    recipient,
+    campaign,
+    template,
+    status: str,
+    sending_identity_id: uuid.UUID | None = None,
+) -> Send:
     now = datetime.now(timezone.utc)
     s = Send(
         tenant="otto",
@@ -93,6 +102,7 @@ async def _seed_send(db_session, recipient, campaign, template, status: str) -> 
         variant_label=template.variant_label,
         esp="noop",
         esp_message_id=f"noop-{uuid.uuid4()}",
+        sending_identity_id=sending_identity_id,
         rendered_subject="Hi",
         status=status,
         queued_at=now,
@@ -138,7 +148,7 @@ async def test_isp_reputation_combines_db_and_cloudwatch(
             ),
         ],
     )
-    monkeypatch.setattr(stats_mod, "get_esp_adapter", lambda: _FakeAdapter(snapshot))
+    monkeypatch.setattr(stats_mod, "get_esp_adapter", lambda identity=None: _FakeAdapter(snapshot))
 
     resp = await client.get(
         "/api/stats/isp-reputation", params={"tenant": "otto"}, headers=auth_headers
@@ -183,7 +193,7 @@ async def test_isp_reputation_combines_db_and_cloudwatch(
 async def test_isp_reputation_degrades_gracefully_without_cloudwatch(
     client: AsyncClient, auth_headers: dict, monkeypatch
 ):
-    monkeypatch.setattr(stats_mod, "get_esp_adapter", lambda: _FailingAdapter())
+    monkeypatch.setattr(stats_mod, "get_esp_adapter", lambda identity=None: _FailingAdapter())
 
     resp = await client.get(
         "/api/stats/isp-reputation", params={"tenant": "otto"}, headers=auth_headers
@@ -196,3 +206,66 @@ async def test_isp_reputation_degrades_gracefully_without_cloudwatch(
     for row in data["isps"]:
         assert row["reputation"] is None
         assert row["effective_daily_rate"] is None
+
+
+@pytest.mark.asyncio
+async def test_isp_reputation_identity_filter_scopes_db_totals(
+    client: AsyncClient, auth_headers: dict, db_session, monkeypatch
+):
+    """SPEC_ADDENDUM_003 §7: `identity_id` scopes the DB-derived per-ISP
+    totals to sends dispatched under that identity, leaving another
+    identity's sends out of the aggregation entirely.
+    """
+    monkeypatch.setattr(
+        stats_mod, "get_esp_adapter", lambda identity=None: _FakeAdapter(esp_base.ReputationSnapshot(
+            account_sending_enabled=True,
+            bounce_rate_24h=None,
+            complaint_rate_24h=None,
+        ))
+    )
+
+    campaign, template = await _seed_campaign_template(db_session)
+    identity_a = await create_identity(db_session)
+    identity_b = await create_identity(db_session)
+
+    email_a = f"test-{uuid.uuid4()}@cadencetests.io"
+    recipient_a = await _seed_recipient(db_session, email_a)
+    email_b = f"test-{uuid.uuid4()}@cadencetests.io"
+    recipient_b = await _seed_recipient(db_session, email_b)
+
+    await _seed_send(
+        db_session, recipient_a, campaign, template, "delivered", identity_a.id
+    )
+    await _seed_send(
+        db_session, recipient_b, campaign, template, "delivered", identity_b.id
+    )
+
+    try:
+        resp = await client.get(
+            "/api/stats/isp-reputation",
+            params={"tenant": "otto", "identity_id": str(identity_a.id)},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+
+        assert data["identity_id"] == str(identity_a.id)
+        other = next(row for row in data["isps"] if row["isp"] == "Other")
+        # Only identity_a's send is counted; identity_b's is excluded.
+        assert other["sent"] == 1
+        assert other["delivered"] == 1
+    finally:
+        async with async_session_factory() as cleanup:
+            from sqlalchemy import text as sa_text
+
+            await cleanup.execute(
+                sa_text(
+                    "DELETE FROM sends WHERE sending_identity_id IN (:a, :b)"
+                ),
+                {"a": str(identity_a.id), "b": str(identity_b.id)},
+            )
+            for identity_id in (identity_a.id, identity_b.id):
+                obj = await cleanup.get(SendingIdentity, identity_id)
+                if obj is not None:
+                    await cleanup.delete(obj)
+            await cleanup.commit()

@@ -87,3 +87,4 @@ class IspReputationOut(BaseModel):
     sending_allowed: bool | None
     dedicated_ip_count: int | None
     isps: list[IspReputationRow]
+    identity_id: str | None = None
