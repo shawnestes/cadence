@@ -33,6 +33,7 @@ from app.domain.rendering import MissingMergeTag, render_template
 from app.domain.timezone import next_window_open, timezone_for_state
 from app.models.recipient import Recipient
 from app.models.send import Send
+from app.models.sending_identity import SendingIdentity
 from app.models.template import Template
 
 log = structlog.get_logger(__name__)
@@ -117,7 +118,6 @@ async def run_once() -> dict[str, int]:
     monthly_capped = 0
     quiet_hours_skipped = 0
 
-    esp = get_esp_adapter()
     signer = get_unsub_signer()
 
     now = datetime.now(timezone.utc)
@@ -198,6 +198,23 @@ async def run_once() -> dict[str, int]:
         ).scalars().all()
         templates_by_id = {t.id: t for t in tmpl_rows}
         recipients_by_id = {r.id: r for r in rcp_rows}
+
+        # Load every sending identity referenced by this batch once (grouped
+        # by id, SPEC_ADDENDUM_003 §4) rather than per-send. Sends with a
+        # NULL sending_identity_id (pre-addendum rows, or callers that never
+        # resolved one) fall back to the bare/legacy adapter via
+        # `get_esp_adapter(None)`.
+        identity_ids = {
+            s.sending_identity_id for s in send_rows if s.sending_identity_id is not None
+        }
+        identities_by_id: dict[uuid.UUID, SendingIdentity] = {}
+        if identity_ids:
+            identity_rows = (
+                await session.execute(
+                    select(SendingIdentity).where(SendingIdentity.id.in_(identity_ids))
+                )
+            ).scalars().all()
+            identities_by_id = {i.id: i for i in identity_rows}
 
         # (a) Engagement-gap gate: subsumes the old flat 24h throttle per
         # SPEC_ADDENDUM_002 §2.2. Gap is max(24h, tier gap); dormant rows are
@@ -452,10 +469,20 @@ async def run_once() -> dict[str, int]:
             # (i) Rate limit.
             await _take_token()
 
-            # (j) Build outbound message.
+            # (j) Resolve this send's identity/adapter and build the
+            # outbound message. `from_address` comes from the identity when
+            # one is stamped; the settings fallback only applies to legacy
+            # (NULL sending_identity_id) sends.
+            identity = identities_by_id.get(send.sending_identity_id)
+            esp = get_esp_adapter(identity)
+            from_address = (
+                identity.from_address
+                if identity is not None
+                else settings.ses_from_address or "no-reply@example.com"
+            )
             msg = OutboundMessage(
                 to_email=recipient.email,
-                from_address=settings.ses_from_address or "no-reply@example.com",
+                from_address=from_address,
                 subject=subject,
                 body_html=body_html,
                 body_text=body_text,

@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from uuid import UUID
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,8 +23,10 @@ from app.schemas.campaign import (
     CampaignUpdate,
 )
 from app.services.segment_query import compile_segment
+from app.services.sending_identity import resolve_for_campaign
 
 router = APIRouter(tags=["campaigns"])
+log = structlog.get_logger(__name__)
 
 
 @router.post("/campaigns", response_model=CampaignOut, status_code=status.HTTP_201_CREATED)
@@ -37,6 +40,7 @@ async def create_campaign(
         node_id=payload.node_id,
         name=payload.name,
         vertical=payload.vertical,
+        sending_identity_id=payload.sending_identity_id,
         cohort_filter=payload.cohort_filter,
         ai_brief=payload.ai_brief,
         mab_config=payload.mab_config,
@@ -227,7 +231,23 @@ async def send_campaign(
         ).scalars().all()
         recipients = list(rows)
 
-    esp_name = get_esp_adapter().name
+    identity = await resolve_for_campaign(db, campaign)
+    if identity is not None:
+        sending_identity_id = identity.id
+        esp_name = identity.esp_provider
+        if identity.status == "paused":
+            # Sends still enqueue as "queued" (compliance-first: never fail
+            # the request) -- they simply won't clear dispatch until the
+            # identity is unpaused. One log line per call, not per row.
+            log.warning(
+                "campaigns.send_identity_paused",
+                campaign_id=str(campaign.id),
+                sending_identity_id=str(identity.id),
+                identity_name=identity.name,
+            )
+    else:
+        sending_identity_id = None
+        esp_name = get_esp_adapter().name
     now = datetime.now(timezone.utc)
 
     queued = 0
@@ -269,6 +289,7 @@ async def send_campaign(
                 cohort_key=template.cohort_key,
                 variant_label=template.variant_label,
                 esp=esp_name,
+                sending_identity_id=sending_identity_id,
                 rendered_subject=template.subject,
                 status="queued",
                 queued_at=now,

@@ -6,6 +6,7 @@ import functools
 import json
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 import boto3
@@ -25,6 +26,9 @@ from app.adapters.esp.base import (
     ReputationSnapshot,
     SendResult,
 )
+
+if TYPE_CHECKING:
+    from app.models.sending_identity import SendingIdentity
 
 logger = structlog.get_logger(__name__)
 
@@ -178,25 +182,67 @@ class SESError(Exception):
 class SESAdapter(ESPAdapter):
     name = "ses"
 
-    def __init__(self, settings) -> None:
+    def __init__(self, settings, identity: "SendingIdentity | None" = None) -> None:
+        """`identity`, when given, is a `SendingIdentity` (SPEC_ADDENDUM_003
+        §3) this adapter is configured *from*: from-address, region,
+        configuration set, and managed-pool name come off
+        `identity.provider_config`, falling back to `settings` for any key
+        the identity doesn't set. `identity=None` keeps the pre-addendum
+        settings-only behavior for the legacy call sites.
+
+        `provider_config.role_arn` / `account_key` are reserved for
+        cross-account AssumeRole routing -- deferred per §9, deliberately
+        not read here. Every identity uses the ambient AWS credentials until
+        a second SES account lands.
+        """
         self._settings = settings
+        self._identity = identity
+
+    @property
+    def _provider_config(self) -> dict:
+        if self._identity is None:
+            return {}
+        return self._identity.provider_config or {}
+
+    @property
+    def _from_address(self) -> str | None:
+        if self._identity is not None:
+            return self._identity.from_address
+        return self._settings.ses_from_address
+
+    @property
+    def _region(self) -> str:
+        return self._provider_config.get("region") or self._settings.aws_region
+
+    @property
+    def _configuration_set(self) -> str | None:
+        return (
+            self._provider_config.get("configuration_set")
+            or self._settings.ses_configuration_set
+        )
+
+    @property
+    def _managed_pool_name(self) -> str | None:
+        return self._provider_config.get("managed_pool_name") or getattr(
+            self._settings, "ses_managed_pool_name", None
+        )
 
     @functools.cached_property
     def _sesv2(self):
         return boto3.client(
-            "sesv2", region_name=self._settings.aws_region, config=_AWS_CLIENT_CONFIG
+            "sesv2", region_name=self._region, config=_AWS_CLIENT_CONFIG
         )
 
     @functools.cached_property
     def _ses(self):
         return boto3.client(
-            "ses", region_name=self._settings.aws_region, config=_AWS_CLIENT_CONFIG
+            "ses", region_name=self._region, config=_AWS_CLIENT_CONFIG
         )
 
     @functools.cached_property
     def _cw(self):
         return boto3.client(
-            "cloudwatch", region_name=self._settings.aws_region, config=_AWS_CLIENT_CONFIG
+            "cloudwatch", region_name=self._region, config=_AWS_CLIENT_CONFIG
         )
 
     # ------------------------------------------------------------------ send
@@ -204,12 +250,12 @@ class SESAdapter(ESPAdapter):
         raw_bytes = self._build_raw_mime(message)
 
         kwargs = {
-            "FromEmailAddress": self._settings.ses_from_address,
+            "FromEmailAddress": self._from_address,
             "Destination": {"ToAddresses": [message.to_email]},
             "Content": {"Raw": {"Data": raw_bytes}},
         }
-        if self._settings.ses_configuration_set:
-            kwargs["ConfigurationSetName"] = self._settings.ses_configuration_set
+        if self._configuration_set:
+            kwargs["ConfigurationSetName"] = self._configuration_set
         tags = [{"Name": k, "Value": v} for k, v in message.message_tags.items()]
         if tags:
             kwargs["EmailTags"] = tags
@@ -261,7 +307,7 @@ class SESAdapter(ESPAdapter):
             managed_dedicated_ip_count: float | None = None
             isp_metrics: list[IspReputationMetric] = []
 
-            pool_name = getattr(self._settings, "ses_managed_pool_name", None)
+            pool_name = self._managed_pool_name
             if pool_name:
                 managed_dedicated_ip_count = await self._metric_avg(
                     "Managed.DedicatedIpCount",

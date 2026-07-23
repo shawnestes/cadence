@@ -17,6 +17,7 @@ from app.models.send import Send
 from app.models.template import Template
 from app.models.workflow import Workflow
 from app.workers import workflow_tick
+from tests._identity_helpers import create_identity
 
 
 async def _seed_recipient(db_session, status: str = "active") -> Recipient:
@@ -73,8 +74,15 @@ async def _seed_journey(db_session, wf: Workflow, recipient: Recipient, node_id:
     return j
 
 
-async def _seed_campaign_and_template(db_session) -> tuple[Campaign, Template]:
-    c = Campaign(tenant="otto", name=f"test-campaign-{uuid.uuid4()}", vertical="auto")
+async def _seed_campaign_and_template(
+    db_session, sending_identity_id=None
+) -> tuple[Campaign, Template]:
+    c = Campaign(
+        tenant="otto",
+        name=f"test-campaign-{uuid.uuid4()}",
+        vertical="auto",
+        sending_identity_id=sending_identity_id,
+    )
     db_session.add(c)
     await db_session.commit()
     await db_session.refresh(c)
@@ -190,6 +198,33 @@ async def test_send_node_enqueues_send(db_session):
     assert sends[0].status == "queued"
     assert sends[0].campaign_id == c.id
     assert sends[0].recipient_id == r.id
+
+
+async def test_send_node_stamps_campaign_sending_identity(db_session):
+    identity = await create_identity(db_session, tenant="otto")
+    r = await _seed_recipient(db_session)
+    c, t = await _seed_campaign_and_template(db_session, sending_identity_id=identity.id)
+    wf_def = {
+        "version": 1,
+        "name": "test-send-identity",
+        "vertical": "auto",
+        "entry": "entry",
+        "nodes": {
+            "entry": {"type": "entry", "next": "send"},
+            "send": {"type": "send", "campaign_id": str(c.id), "next": "exit_done"},
+            "exit_done": {"type": "exit", "reason": "completed"},
+        },
+    }
+    wf = await _seed_workflow(db_session, wf_def)
+    j = await _seed_journey(db_session, wf, r, "entry")
+
+    for _ in range(3):
+        await workflow_tick.run_once()
+
+    sends = await _read_sends_for_journey(j.id)
+    assert len(sends) == 1
+    assert sends[0].sending_identity_id == identity.id
+    assert sends[0].esp == identity.esp_provider
 
 
 async def test_exit_node_completes_journey(db_session):

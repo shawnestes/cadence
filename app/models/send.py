@@ -27,6 +27,9 @@ class Send(Base):
     variant_label: Mapped[str] = mapped_column(Text, nullable=False)
     esp: Mapped[str] = mapped_column(Text, nullable=False)
     esp_message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sending_identity_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sending_identities.id"), nullable=True
+    )
     rendered_subject: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False)
     queued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

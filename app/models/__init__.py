@@ -5,6 +5,7 @@ from app.models.event import Event
 from app.models.journey import Journey
 from app.models.recipient import Recipient
 from app.models.send import Send
+from app.models.sending_identity import SendingIdentity
 from app.models.suppression import Suppression
 from app.models.template import Template
 from app.models.unsub_outbox import UnsubOutbox
@@ -20,6 +21,7 @@ __all__ = [
     "Journey",
     "Recipient",
     "Send",
+    "SendingIdentity",
     "Suppression",
     "Template",
     "TimestampMixin",

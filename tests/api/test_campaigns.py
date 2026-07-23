@@ -6,7 +6,9 @@ import uuid
 
 from sqlalchemy import select
 
+from app.models.campaign import Campaign
 from app.models.send import Send
+from tests._identity_helpers import create_identity, get_or_create_default_identity
 
 
 def _campaign_body(**overrides) -> dict:
@@ -286,3 +288,143 @@ async def test_send_by_invalid_segment_returns_400(client, auth_headers):
         headers=auth_headers,
     )
     assert resp.status_code == 400
+
+
+# --- Sending identities (SPEC_ADDENDUM_003) ----------------------------------
+
+
+async def test_create_campaign_stamps_explicit_sending_identity_id(
+    client, auth_headers, db_session
+):
+    identity = await create_identity(db_session)
+
+    resp = await client.post(
+        "/api/campaigns",
+        json=_campaign_body(sending_identity_id=str(identity.id)),
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["sending_identity_id"] == str(identity.id)
+
+    row = (
+        await db_session.execute(select(Campaign).where(Campaign.id == uuid.UUID(resp.json()["id"])))
+    ).scalar_one()
+    assert row.sending_identity_id == identity.id
+
+
+async def test_send_stamps_tenant_default_identity(client, auth_headers, db_session):
+    default_identity = await get_or_create_default_identity(db_session, tenant="otto")
+
+    c = await client.post("/api/campaigns", json=_campaign_body(), headers=auth_headers)
+    cid = c.json()["id"]
+    t = await client.post("/api/templates", json=_template_body(cid), headers=auth_headers)
+    tid = t.json()["id"]
+    await client.patch(
+        f"/api/templates/{tid}", json={"status": "approved"}, headers=auth_headers
+    )
+
+    email = f"test-{uuid.uuid4()}@cadencetests.io"
+    r = await client.post(
+        "/api/ingest/recipients", json=_recipient_body(email), headers=auth_headers
+    )
+    rid = r.json()["id"]
+
+    resp = await client.post(
+        f"/api/campaigns/{cid}/send",
+        json={"recipient_ids": [rid], "tenant": "otto"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["queued"] == 1
+
+    rows = (
+        await db_session.execute(select(Send).where(Send.recipient_id == uuid.UUID(rid)))
+    ).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].sending_identity_id == default_identity.id
+    assert rows[0].esp == default_identity.esp_provider
+
+
+async def test_send_explicit_campaign_identity_wins_over_tenant_default(
+    client, auth_headers, db_session
+):
+    await get_or_create_default_identity(db_session, tenant="otto")
+    explicit_identity = await create_identity(db_session, tenant="otto")
+
+    c = await client.post("/api/campaigns", json=_campaign_body(), headers=auth_headers)
+    cid = c.json()["id"]
+    patch = await client.patch(
+        f"/api/campaigns/{cid}",
+        json={"sending_identity_id": str(explicit_identity.id)},
+        headers=auth_headers,
+    )
+    assert patch.status_code == 200
+
+    t = await client.post("/api/templates", json=_template_body(cid), headers=auth_headers)
+    tid = t.json()["id"]
+    await client.patch(
+        f"/api/templates/{tid}", json={"status": "approved"}, headers=auth_headers
+    )
+
+    email = f"test-{uuid.uuid4()}@cadencetests.io"
+    r = await client.post(
+        "/api/ingest/recipients", json=_recipient_body(email), headers=auth_headers
+    )
+    rid = r.json()["id"]
+
+    resp = await client.post(
+        f"/api/campaigns/{cid}/send",
+        json={"recipient_ids": [rid], "tenant": "otto"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["queued"] == 1
+
+    rows = (
+        await db_session.execute(select(Send).where(Send.recipient_id == uuid.UUID(rid)))
+    ).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].sending_identity_id == explicit_identity.id
+
+
+async def test_send_with_paused_identity_leaves_sends_queued_not_failed(
+    client, auth_headers, db_session
+):
+    paused_identity = await create_identity(db_session, tenant="otto", status="paused")
+
+    c = await client.post("/api/campaigns", json=_campaign_body(), headers=auth_headers)
+    cid = c.json()["id"]
+    patch = await client.patch(
+        f"/api/campaigns/{cid}",
+        json={"sending_identity_id": str(paused_identity.id)},
+        headers=auth_headers,
+    )
+    assert patch.status_code == 200
+
+    t = await client.post("/api/templates", json=_template_body(cid), headers=auth_headers)
+    tid = t.json()["id"]
+    await client.patch(
+        f"/api/templates/{tid}", json={"status": "approved"}, headers=auth_headers
+    )
+
+    email = f"test-{uuid.uuid4()}@cadencetests.io"
+    r = await client.post(
+        "/api/ingest/recipients", json=_recipient_body(email), headers=auth_headers
+    )
+    rid = r.json()["id"]
+
+    resp = await client.post(
+        f"/api/campaigns/{cid}/send",
+        json={"recipient_ids": [rid], "tenant": "otto"},
+        headers=auth_headers,
+    )
+    # Never fails the request just because the identity is paused.
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["queued"] == 1
+
+    rows = (
+        await db_session.execute(select(Send).where(Send.recipient_id == uuid.UUID(rid)))
+    ).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].status == "queued"
+    assert rows[0].sending_identity_id == paused_identity.id

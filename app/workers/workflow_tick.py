@@ -27,6 +27,7 @@ from app.domain.workflow_defs import (
     WorkflowDefinition,
     parse_iso_duration,
 )
+from app.models.campaign import Campaign
 from app.models.event import Event
 from app.models.journey import Journey
 from app.models.recipient import Recipient
@@ -34,6 +35,7 @@ from app.models.send import Send
 from app.models.template import Template
 from app.models.workflow import Workflow
 from app.models.workflow_version import WorkflowVersion
+from app.services.sending_identity import resolve_for_campaign
 
 log = structlog.get_logger(__name__)
 
@@ -258,7 +260,26 @@ async def _enqueue_send(
         journey.next_action_at = now
         return
 
-    esp = get_esp_adapter()
+    campaign = await session.get(Campaign, node.campaign_id)
+    identity = await resolve_for_campaign(session, campaign) if campaign is not None else None
+    if identity is not None:
+        sending_identity_id = identity.id
+        esp_name = identity.esp_provider
+        if identity.status == "paused":
+            # Same rule as the campaign send endpoint: enqueue regardless,
+            # log once rather than once per send.
+            log.warning(
+                "workflow_tick.send_identity_paused",
+                journey_id=str(journey.id),
+                tenant=journey.tenant,
+                campaign_id=str(node.campaign_id),
+                sending_identity_id=str(identity.id),
+                identity_name=identity.name,
+            )
+    else:
+        sending_identity_id = None
+        esp_name = get_esp_adapter().name
+
     send = Send(
         tenant=journey.tenant,
         journey_id=journey.id,
@@ -267,7 +288,8 @@ async def _enqueue_send(
         recipient_id=journey.recipient_id,
         cohort_key=template.cohort_key,
         variant_label=template.variant_label,
-        esp=esp.name,
+        esp=esp_name,
+        sending_identity_id=sending_identity_id,
         rendered_subject=template.subject,
         status="queued",
         queued_at=now,
