@@ -14,6 +14,7 @@ import structlog
 from app.adapters.esp.base import ESPAdapter
 from app.adapters.esp.noop import NoopESP
 from app.adapters.esp.ses import SESAdapter
+from app.adapters.esp.ses_smtp import SESSMTPAdapter
 from app.core.config import get_settings
 from app.models.sending_identity import SendingIdentity
 
@@ -57,6 +58,8 @@ def get_esp_adapter(identity: SendingIdentity | None = None) -> ESPAdapter:
 
     if identity.esp_provider == "ses":
         adapter: ESPAdapter = SESAdapter(settings, identity=identity)
+    elif identity.esp_provider == "ses_smtp":
+        adapter = SESSMTPAdapter(settings, identity=identity)
     else:
         logger.warning(
             "esp_factory.unsupported_provider",
