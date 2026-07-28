@@ -24,3 +24,15 @@ deployment serves every domain.
 
 Tests live in the cadence suite (`tests/test_unsub_server_*.py`) and run
 with `uv run pytest` from the repo root.
+
+## Reproducible builds
+
+`unsub_server/uv.lock` pins every dependency; regenerate it with
+`uv lock --project unsub_server` from the repo root whenever
+`unsub_server/pyproject.toml` changes, and commit the updated lock.
+The Dockerfile installs from that lock with `uv sync --frozen --no-dev`.
+
+To sanity-check the image without a DB:
+
+    docker run --rm cadence-unsub uv run --project unsub_server --frozen --no-dev \
+      python -c "import unsub_server.main; print('app ok')"

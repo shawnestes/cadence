@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 from html import escape
 
+import structlog
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, Response
 
@@ -15,6 +16,7 @@ from unsub_server import db
 from unsub_server.tokens import UnsubTokenError, verify
 
 app = FastAPI(title="cadence-unsub", docs_url=None, redoc_url=None, openapi_url=None)
+logger = structlog.get_logger()
 
 _PAGE_STYLE = (
     "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,"
@@ -93,6 +95,13 @@ async def unsub_one_click(token: str) -> Response:
         return Response(status_code=404)
 
     await db.record_unsub(payload.tenant, payload.recipient_id, recipient["email"])
+
+    logger.info(
+        "unsub.one_click",
+        tenant=payload.tenant,
+        recipient_id=payload.recipient_id,
+        send_id=payload.send_id,
+    )
 
     tenant = escape(payload.tenant)
     body = (
