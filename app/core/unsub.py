@@ -40,8 +40,19 @@ class UnsubSigner:
             raise UnsubTokenError("bad signature") from e
         return UnsubPayload(recipient_id=data["r"], send_id=data.get("s"), tenant=data["t"])
 
-    def build_url(self, payload: UnsubPayload) -> str:
-        return f"{self._base_url}/u/{self.sign(payload)}"
+    def build_url(self, payload: UnsubPayload, base_url: str | None = None) -> str:
+        base = base_url.rstrip("/") if base_url else self._base_url
+        return f"{base}/u/{self.sign(payload)}"
+
+
+def unsub_base_for_identity(identity) -> str | None:
+    """Unsub link base for a sending identity: `unsub.<sending_domain>`,
+    unless the identity's `provider_config.unsub_base_url` overrides it.
+    None (also for `identity=None`) means the settings-level default."""
+    if identity is None:
+        return None
+    config = identity.provider_config or {}
+    return config.get("unsub_base_url") or f"https://unsub.{identity.sending_domain}"
 
 
 @lru_cache(maxsize=1)

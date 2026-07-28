@@ -27,7 +27,7 @@ from app.adapters.esp.base import OutboundMessage
 from app.adapters.esp.factory import get_esp_adapter
 from app.core.config import get_settings
 from app.core.db import async_session_factory
-from app.core.unsub import UnsubPayload, get_unsub_signer
+from app.core.unsub import UnsubPayload, get_unsub_signer, unsub_base_for_identity
 from app.domain.engagement import TIER_DORMANT, min_gap_for_tier
 from app.domain.rendering import MissingMergeTag, render_template
 from app.domain.timezone import next_window_open, timezone_for_state
@@ -435,13 +435,18 @@ async def run_once() -> dict[str, int]:
                 )
                 continue
 
-            # (g) Build unsub URL + render.
+            # (g) Build unsub URL + render. The identity is resolved here
+            # (not at dispatch) because its sending_domain decides the unsub
+            # link host: unsub.<sending_domain>, settings fallback for
+            # legacy NULL-identity sends.
+            identity = identities_by_id.get(send.sending_identity_id)
             unsub_url = signer.build_url(
                 UnsubPayload(
                     recipient_id=str(recipient.id),
                     send_id=str(send.id),
                     tenant=send.tenant,
-                )
+                ),
+                base_url=unsub_base_for_identity(identity),
             )
             try:
                 subject, body_html, body_text = render_template(
@@ -469,11 +474,10 @@ async def run_once() -> dict[str, int]:
             # (i) Rate limit.
             await _take_token()
 
-            # (j) Resolve this send's identity/adapter and build the
-            # outbound message. `from_address` comes from the identity when
-            # one is stamped; the settings fallback only applies to legacy
+            # (j) Resolve this send's adapter and build the outbound
+            # message. `from_address` comes from the identity when one is
+            # stamped; the settings fallback only applies to legacy
             # (NULL sending_identity_id) sends.
-            identity = identities_by_id.get(send.sending_identity_id)
             esp = get_esp_adapter(identity)
             from_address = (
                 identity.from_address

@@ -21,7 +21,7 @@ CREATE TABLE sending_identities (
   id               uuid PRIMARY KEY,           -- uuid7
   tenant           text NOT NULL,
   name             text NOT NULL,              -- "otto-ses-primary", "otto-sendgrid"
-  esp_provider     text NOT NULL,              -- 'ses' | 'sendgrid' | 'expertsender' | 'noop'
+  esp_provider     text NOT NULL,              -- 'ses' | 'ses_smtp' | 'sendgrid' | 'expertsender' | 'noop'
   from_address     text NOT NULL,
   sending_domain   text NOT NULL,
   credentials_ref  text,                       -- env-var prefix or Secrets Manager name; never raw secrets
@@ -55,6 +55,7 @@ One migration: create table, seed a `default` SES identity per tenant from curre
 
 - Queue time: resolve identity (campaign's or tenant default), stamp `sends.sending_identity_id` + `sends.esp`. Paused identity → sends stay queued (alert, don't fail).
 - Dispatch time: send worker groups the claimed batch by identity and dispatches each group through its adapter; `from_address` comes from the identity (global fallback removed).
+- Unsub links: identity-stamped sends build unsubscribe URLs on `https://unsub.<sending_domain>` (override per identity via `provider_config.unsub_base_url`); legacy NULL-identity sends keep the global `CADENCE_UNSUB_BASE_URL`. Tokens are host-independent — the shared unsub endpoint verifies them regardless of which host served the link.
 
 ## 5. Quota + rate limiting
 

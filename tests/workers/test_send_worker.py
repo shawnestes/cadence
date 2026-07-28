@@ -589,3 +589,68 @@ async def test_run_once_dispatches_per_identity_adapter_and_uses_identity_from_a
     assert refreshed_a.esp == "fake-ses"
     assert refreshed_b.status == "sent"
     assert refreshed_b.esp == "fake-ses"
+
+
+async def test_run_once_unsub_links_use_identity_domain(db_session, monkeypatch):
+    """An identity-stamped send gets unsub links on unsub.<sending_domain>;
+    a legacy NULL-identity send keeps the settings-level base URL."""
+    settings = _settings_override(monkeypatch, send_daily_quota=10_000_000)
+
+    identity = await create_identity(db_session, tenant="otto")
+
+    class _CapturingAdapter:
+        name = "fake-ses"
+
+        def __init__(self) -> None:
+            self.sent: list = []
+
+        async def send(self, message):
+            from app.adapters.esp.base import SendResult
+
+            self.sent.append(message)
+            return SendResult(esp_message_id=f"fake-{uuid.uuid4()}")
+
+        async def get_reputation(self):
+            raise NotImplementedError
+
+        def parse_webhook(self, payload, signature):
+            raise NotImplementedError
+
+        async def add_to_esp_suppression(self, email, reason):
+            raise NotImplementedError
+
+    adapters_by_key: dict = {}
+
+    def _fake_get_esp_adapter(identity=None):
+        key = identity.id if identity is not None else None
+        if key not in adapters_by_key:
+            adapters_by_key[key] = _CapturingAdapter()
+        return adapters_by_key[key]
+
+    monkeypatch.setattr(send_worker, "get_esp_adapter", _fake_get_esp_adapter)
+
+    r_a = await _seed_recipient(db_session, f"test-{uuid.uuid4()}@cadencetests.io")
+    r_b = await _seed_recipient(db_session, f"test-{uuid.uuid4()}@cadencetests.io")
+    c, t = await _seed_campaign_template(db_session)
+    await _seed_queued_send(
+        db_session, c, t, r_a, queued_at=_ANCIENT, sending_identity_id=identity.id
+    )
+    await _seed_queued_send(
+        db_session,
+        c,
+        t,
+        r_b,
+        queued_at=_ANCIENT + timedelta(microseconds=1),
+        sending_identity_id=None,
+    )
+
+    result = await send_worker.run_once()
+
+    assert result["sent"] == 2
+    identity_msg = adapters_by_key[identity.id].sent[0]
+    legacy_msg = adapters_by_key[None].sent[0]
+    assert identity_msg.list_unsubscribe.startswith(
+        f"https://unsub.{identity.sending_domain}/u/"
+    )
+    assert f"https://unsub.{identity.sending_domain}/u/" in identity_msg.body_html
+    assert legacy_msg.list_unsubscribe.startswith(f"{settings.unsub_base_url}/u/")
