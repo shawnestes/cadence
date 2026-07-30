@@ -8,6 +8,7 @@ from app.models.send import Send
 from app.models.sending_identity import SendingIdentity
 from app.models.suppression import Suppression
 from app.models.template import Template
+from app.models.unsub_diagnostic import UnsubDiagnostic
 from app.models.unsub_outbox import UnsubOutbox
 from app.models.workflow import Workflow
 from app.models.workflow_version import WorkflowVersion
@@ -25,6 +26,7 @@ __all__ = [
     "Suppression",
     "Template",
     "TimestampMixin",
+    "UnsubDiagnostic",
     "UnsubOutbox",
     "Workflow",
     "WorkflowVersion",

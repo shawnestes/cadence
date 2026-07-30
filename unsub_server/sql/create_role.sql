@@ -10,3 +10,4 @@ GRANT SELECT (id, tenant, email, status), UPDATE (status, updated_at)
   ON recipients TO unsub_server;
 GRANT SELECT, INSERT ON suppressions TO unsub_server;
 GRANT SELECT, INSERT ON unsub_outbox TO unsub_server;
+GRANT INSERT ON unsub_diagnostics TO unsub_server;

@@ -55,6 +55,41 @@ async def fetch_recipient(tenant: str, recipient_id: str) -> dict | None:
     return dict(row) if row is not None else None
 
 
+async def insert_diagnostic(
+    tenant: str | None,
+    recipient_id: str | None,
+    reason: str,
+    token: str | None,
+    host: str | None,
+) -> None:
+    """Record a failed unsubscribe lookup for later diagnosis.
+
+    Users never see these as errors; the row is the only trace. recipient_id
+    is stored as text-cast-to-uuid only when it parses; otherwise NULL (the
+    raw value is still inside the token column).
+    """
+    rid: uuid.UUID | None
+    try:
+        rid = uuid.UUID(recipient_id) if recipient_id else None
+    except ValueError:
+        rid = None
+    async with get_engine().begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO unsub_diagnostics (id, tenant, recipient_id, reason, token, host) "
+                "VALUES (:id, :t, :rid, :reason, :token, :host)"
+            ),
+            {
+                "id": _uuid7(),
+                "t": tenant,
+                "rid": rid,
+                "reason": reason,
+                "token": (token or "")[:1024] or None,
+                "host": host,
+            },
+        )
+
+
 async def record_unsub(tenant: str, recipient_id: str, email: str) -> None:
     """Suppress + queue outbox + flip recipient status, atomically.
 

@@ -91,7 +91,16 @@ harmless duplication that keeps local dev working with one process.
 
 ## Error handling
 
-- Invalid/expired token: 410 on both routes (matches cadence today).
+- Invalid/expired token: 410 on both routes (styled "link isn't active"
+  page on GET; bare 410 on POST for machine callers).
+- Unknown recipient (valid token, no matching row): never a user-facing
+  error. GET shows the "link isn't active" page (410); POST shows the
+  normal "You're unsubscribed" page (200). Both record a row in
+  `unsub_diagnostics` (tenant, recipient_id, token, host, reason) for
+  later diagnosis. Cadence's own `/u/` routes behave identically.
+- Pages are brand-generic: they name the sending domain derived from the
+  Host header (`unsub.karzinsurance.com` → "karzinsurance.com"), never the
+  internal tenant.
 - DB unavailable: 500; the mailbox provider retries one-click POSTs.
   No local queue in v1 — Postgres (Aurora) is the availability story.
 - Duplicate unsub: success response, no duplicate rows (unique constraint

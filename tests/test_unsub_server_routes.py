@@ -96,9 +96,25 @@ async def test_post_bad_token_410(unsub_client):
     assert resp.status_code == 410
 
 
-async def test_post_unknown_recipient_404(unsub_client):
-    resp = await unsub_client.post(f"/u/{_token(str(uuid.uuid4()))}")
-    assert resp.status_code == 404
+async def test_post_unknown_recipient_shows_done_page_and_records_diagnostic(
+    unsub_client, db_session
+):
+    from app.models.unsub_diagnostic import UnsubDiagnostic
+
+    ghost_id = str(uuid.uuid4())
+    resp = await unsub_client.post(f"/u/{_token(ghost_id)}")
+
+    assert resp.status_code == 200
+    assert "unsubscribed" in resp.text.lower()
+    diag = (
+        await db_session.execute(
+            select(UnsubDiagnostic).where(
+                UnsubDiagnostic.recipient_id == uuid.UUID(ghost_id)
+            )
+        )
+    ).scalar_one_or_none()
+    assert diag is not None
+    assert diag.reason == "unknown_recipient"
 
 
 async def test_get_unknown_recipient_410(unsub_client):

@@ -109,3 +109,35 @@ async def test_expired_token_returns_410(client, db_session):
 async def test_bad_token_returns_410(client):
     resp = await client.post("/u/invalid-token")
     assert resp.status_code == 410
+
+
+async def test_post_unknown_recipient_shows_done_page_and_records_diagnostic(client):
+    from app.models.unsub_diagnostic import UnsubDiagnostic
+
+    signer = get_unsub_signer()
+    ghost_id = str(uuid.uuid4())
+    token = signer.sign(UnsubPayload(recipient_id=ghost_id, send_id=None, tenant="otto"))
+
+    resp = await client.post(f"/u/{token}")
+
+    assert resp.status_code == 200
+    assert "unsubscribed" in resp.text.lower()
+    diag = await _fresh_one(
+        select(UnsubDiagnostic).where(UnsubDiagnostic.recipient_id == uuid.UUID(ghost_id))
+    )
+    assert diag is not None
+    assert diag.reason == "unknown_recipient"
+    assert diag.tenant == "otto"
+
+
+async def test_get_unknown_recipient_shows_inactive_page_not_error_text(client):
+    signer = get_unsub_signer()
+    token = signer.sign(
+        UnsubPayload(recipient_id=str(uuid.uuid4()), send_id=None, tenant="otto")
+    )
+
+    resp = await client.get(f"/u/{token}")
+
+    assert resp.status_code == 410
+    assert "not found" not in resp.text.lower()
+    assert "isn't active" in resp.text
