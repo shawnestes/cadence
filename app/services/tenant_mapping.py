@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import yaml
@@ -56,7 +57,15 @@ def _parse_consent(raw: Any) -> ConsentSpec:
     for key in ("text", "captured_at", "source_label"):
         if key not in raw:
             raise ValueError(f"consent: missing required key {key!r}")
-    channels = tuple(int(c) for c in raw.get("channels", [1]))
+    raw_channels = raw.get("channels", [1])
+    if not isinstance(raw_channels, list):
+        raise ValueError(
+            f"consent.channels: expected a list of ints, got {type(raw_channels).__name__}"
+        )
+    try:
+        channels = tuple(int(c) for c in raw_channels)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"consent.channels: invalid channel value in {raw_channels!r}") from exc
     if not channels:
         raise ValueError("consent: channels must not be empty")
     optional = {
@@ -70,24 +79,35 @@ def _parse_consent(raw: Any) -> ConsentSpec:
         source_label=str(raw["source_label"]),
         text=_field_spec(raw["text"], "consent.text"),
         captured_at=_field_spec(raw["captured_at"], "consent.captured_at"),
-        optional=optional,
+        optional=MappingProxyType(dict(optional)),
     )
 
 
 def _parse_repeating(raw: Any) -> tuple[RepeatingSpec, ...]:
     if not raw:
         return ()
+    if not isinstance(raw, dict):
+        raise ValueError(f"repeating: expected a mapping, got {type(raw).__name__}")
     specs: list[RepeatingSpec] = []
     for name, body in raw.items():
+        if not isinstance(body, dict):
+            raise ValueError(
+                f"repeating.{name}: expected a mapping, got {type(body).__name__}"
+            )
         if "columns" not in body or "fields" not in body:
             raise ValueError(f"repeating.{name}: 'columns' and 'fields' are required")
+        raw_max = body.get("max", 5)
+        try:
+            max_value = int(raw_max)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"repeating.{name}.max: invalid integer {raw_max!r}") from exc
         specs.append(
             RepeatingSpec(
                 name=name,
                 column_template=body["columns"],
                 json_key=body.get("json_key", name),
                 fields=tuple(body["fields"]),
-                max=int(body.get("max", 5)),
+                max=max_value,
             )
         )
     return tuple(specs)
@@ -96,6 +116,8 @@ def _parse_repeating(raw: Any) -> tuple[RepeatingSpec, ...]:
 def _parse_derived(raw: Any, repeating: tuple[RepeatingSpec, ...]) -> tuple[DerivedSpec, ...]:
     if not raw:
         return ()
+    if not isinstance(raw, dict):
+        raise ValueError(f"derived: expected a mapping, got {type(raw).__name__}")
     known = {r.name for r in repeating}
     specs: list[DerivedSpec] = []
     for name, expr in raw.items():
@@ -130,10 +152,23 @@ def load_tenant_mapping(tenant: str, mappings_dir: Path | None = None) -> Tenant
     if not path.is_file():
         raise ValueError(f"no mapping file for tenant {tenant!r} at {path}")
 
-    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        raise ValueError(f"{path}: invalid YAML: {exc}") from exc
+
+    if not isinstance(raw, dict):
+        raise ValueError(f"{path}: expected a top-level mapping, got {type(raw).__name__}")
+
     identity = raw.get("identity") or {}
+    if not isinstance(identity, dict):
+        raise ValueError(f"{path}: identity: expected a mapping, got {type(identity).__name__}")
     if "email" not in identity:
         raise ValueError(f"{path}: identity.email is required")
+
+    raw_fields = raw.get("fields") or {}
+    if not isinstance(raw_fields, dict):
+        raise ValueError(f"{path}: fields: expected a mapping, got {type(raw_fields).__name__}")
 
     repeating = _parse_repeating(raw.get("repeating"))
     mapping = TenantMapping(
@@ -141,10 +176,12 @@ def load_tenant_mapping(tenant: str, mappings_dir: Path | None = None) -> Tenant
         email_source=identity["email"],
         external_id_source=identity.get("external_id"),
         vertical_source=identity.get("vertical"),
-        fields={
-            name: _field_spec(body, f"fields.{name}")
-            for name, body in (raw.get("fields") or {}).items()
-        },
+        fields=MappingProxyType(
+            {
+                name: _field_spec(body, f"fields.{name}")
+                for name, body in raw_fields.items()
+            }
+        ),
         repeating=repeating,
         derived=_parse_derived(raw.get("derived"), repeating),
         consent=_parse_consent(raw.get("consent")),

@@ -66,3 +66,97 @@ def test_missing_consent_block_raises(tmp_path: Path):
     )
     with pytest.raises(ValueError, match="consent"):
         load_tenant_mapping("acme", mappings_dir=tmp_path)
+
+
+_VALID_CONSENT = (
+    "consent:\n"
+    "  channels: [1]\n"
+    "  source_label: acme\n"
+    "  text: {from: t}\n"
+    "  captured_at: {from: c}\n"
+)
+
+
+def test_fields_wrong_type_raises(tmp_path: Path):
+    """Finding 1: `fields:` as a list, not a mapping, must not hit AttributeError."""
+    (tmp_path / "acme.yaml").write_text(
+        "tenant: acme\nidentity:\n  email: email\nfields:\n  - foo\n" + _VALID_CONSENT,
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="fields"):
+        load_tenant_mapping("acme", mappings_dir=tmp_path)
+
+
+def test_invalid_yaml_syntax_raises(tmp_path: Path):
+    """Finding 2: a syntactically broken file must not leak yaml.YAMLError."""
+    (tmp_path / "acme.yaml").write_text(
+        "tenant: acme\nidentity: [unbalanced\n", encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="invalid YAML"):
+        load_tenant_mapping("acme", mappings_dir=tmp_path)
+
+
+def test_repeating_wrong_type_raises(tmp_path: Path):
+    """Finding 3: `repeating:` as a list, not a mapping, must not hit AttributeError."""
+    (tmp_path / "acme.yaml").write_text(
+        "tenant: acme\nidentity:\n  email: email\nfields: {}\nrepeating:\n  - foo\n"
+        + _VALID_CONSENT,
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="repeating"):
+        load_tenant_mapping("acme", mappings_dir=tmp_path)
+
+
+def test_derived_wrong_type_raises(tmp_path: Path):
+    """Finding 3: `derived:` as a list, not a mapping, must not hit AttributeError."""
+    (tmp_path / "acme.yaml").write_text(
+        "tenant: acme\nidentity:\n  email: email\nfields: {}\nderived:\n  - foo\n"
+        + _VALID_CONSENT,
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="derived"):
+        load_tenant_mapping("acme", mappings_dir=tmp_path)
+
+
+def test_consent_channels_non_int_raises(tmp_path: Path):
+    """Finding 4: a non-numeric channel value must name consent.channels."""
+    (tmp_path / "acme.yaml").write_text(
+        "tenant: acme\n"
+        "identity:\n  email: email\n"
+        "fields: {}\n"
+        "consent:\n"
+        "  channels: ['one']\n"
+        "  source_label: acme\n"
+        "  text: {from: t}\n"
+        "  captured_at: {from: c}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="consent.channels"):
+        load_tenant_mapping("acme", mappings_dir=tmp_path)
+
+
+def test_repeating_max_non_int_raises(tmp_path: Path):
+    """Audit finding: repeating.<name>.max must not raise a bare, unnamed ValueError."""
+    (tmp_path / "acme.yaml").write_text(
+        "tenant: acme\n"
+        "identity:\n  email: email\n"
+        "fields: {}\n"
+        "repeating:\n"
+        "  vehicles:\n"
+        "    columns: 'vehicle_{n}_{field}'\n"
+        "    fields: [year]\n"
+        "    max: many\n"
+        + _VALID_CONSENT,
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="repeating.vehicles.max"):
+        load_tenant_mapping("acme", mappings_dir=tmp_path)
+
+
+def test_returned_fields_mapping_is_immutable():
+    """Finding 5: the cache must not hand out mutable shared state."""
+    m = load_tenant_mapping("otto")
+    with pytest.raises(TypeError):
+        m.fields["new_field"] = None  # type: ignore[index]
+    with pytest.raises(TypeError):
+        m.consent.optional["new_key"] = None  # type: ignore[index]
