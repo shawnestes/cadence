@@ -9,6 +9,7 @@ from sqlalchemy import select, text
 
 from app.core.db import async_session_factory
 from app.models.journey import Journey
+from tests.api._contact_profile_seed import seed_contact_profile
 
 
 def _email() -> str:
@@ -77,6 +78,20 @@ async def _ingest(client, auth_headers, **overrides) -> str:
     return resp.json()["id"]
 
 
+async def _ingest_with_profile(
+    client, auth_headers, *, email_domain: str, **overrides
+) -> str:
+    """Ingest a recipient and seed a matching contact_profile row.
+
+    compile_segment targets contact_profile, not recipients.attributes, so
+    backfill tests select candidates by email_domain rather than the
+    ingest-time attributes bag.
+    """
+    rid = await _ingest(client, auth_headers, **overrides)
+    await seed_contact_profile(rid, email_domain=email_domain)
+    return rid
+
+
 async def _journeys_for_workflow(wid: str) -> list[Journey]:
     async with async_session_factory() as s:
         return (
@@ -100,13 +115,13 @@ async def _mark_terminal(journey_id, *, status: str, completed_at: datetime) -> 
 
 async def test_backfill_enrolls_matching_recipients(client, auth_headers):
     wid = await _create_and_activate_workflow(client, auth_headers)
-    r1 = await _ingest(client, auth_headers, attributes={"state": "TX"})
-    r2 = await _ingest(client, auth_headers, attributes={"state": "TX"})
-    await _ingest(client, auth_headers, attributes={"state": "CA"})
+    r1 = await _ingest_with_profile(client, auth_headers, email_domain="tx.cadencetests.io")
+    r2 = await _ingest_with_profile(client, auth_headers, email_domain="tx.cadencetests.io")
+    await _ingest_with_profile(client, auth_headers, email_domain="ca.cadencetests.io")
 
     resp = await client.post(
         f"/api/workflows/{wid}/backfill",
-        json={"segment": {"attributes.state": "TX"}, "limit": 100},
+        json={"segment": {"email_domain": "tx.cadencetests.io"}, "limit": 100},
         headers=auth_headers,
     )
     assert resp.status_code == 200, resp.text
@@ -124,11 +139,11 @@ async def test_backfill_enrolls_matching_recipients(client, auth_headers):
 async def test_backfill_respects_limit(client, auth_headers):
     wid = await _create_and_activate_workflow(client, auth_headers)
     for _ in range(3):
-        await _ingest(client, auth_headers, attributes={"state": "TX"})
+        await _ingest_with_profile(client, auth_headers, email_domain="tx.cadencetests.io")
 
     resp = await client.post(
         f"/api/workflows/{wid}/backfill",
-        json={"segment": {"attributes.state": "TX"}, "limit": 2},
+        json={"segment": {"email_domain": "tx.cadencetests.io"}, "limit": 2},
         headers=auth_headers,
     )
     assert resp.status_code == 200, resp.text
@@ -154,6 +169,7 @@ async def test_backfill_skips_suppressed_recipients(client, auth_headers):
         headers=auth_headers,
     )
     assert resp.status_code == 201
+    await seed_contact_profile(resp.json()["id"], email_domain="tx.cadencetests.io")
 
     sup = await client.post(
         "/api/suppressions",
@@ -164,7 +180,7 @@ async def test_backfill_skips_suppressed_recipients(client, auth_headers):
 
     resp = await client.post(
         f"/api/workflows/{wid}/backfill",
-        json={"segment": {"attributes.state": "TX"}, "limit": 100},
+        json={"segment": {"email_domain": "tx.cadencetests.io"}, "limit": 100},
         headers=auth_headers,
     )
     assert resp.status_code == 200, resp.text
@@ -175,13 +191,13 @@ async def test_backfill_skips_suppressed_recipients(client, auth_headers):
 
 async def test_backfill_skips_active_journey(client, auth_headers):
     wid = await _create_and_activate_workflow(client, auth_headers)
-    rid = await _ingest(client, auth_headers, attributes={"state": "TX"})
+    rid = await _ingest_with_profile(client, auth_headers, email_domain="tx.cadencetests.io")
 
     # First backfill enrolls; second (before the journey completes) hits the
     # active-journey uniqueness guard.
     first = await client.post(
         f"/api/workflows/{wid}/backfill",
-        json={"segment": {"attributes.state": "TX"}, "limit": 100},
+        json={"segment": {"email_domain": "tx.cadencetests.io"}, "limit": 100},
         headers=auth_headers,
     )
     assert first.status_code == 200
@@ -189,7 +205,7 @@ async def test_backfill_skips_active_journey(client, auth_headers):
 
     second = await client.post(
         f"/api/workflows/{wid}/backfill",
-        json={"segment": {"attributes.state": "TX"}, "limit": 100},
+        json={"segment": {"email_domain": "tx.cadencetests.io"}, "limit": 100},
         headers=auth_headers,
     )
     assert second.status_code == 200
@@ -203,11 +219,11 @@ async def test_backfill_skips_active_journey(client, auth_headers):
 
 async def test_backfill_respects_cooldown(client, auth_headers):
     wid = await _create_and_activate_workflow(client, auth_headers, reentry_cooldown="P30D")
-    rid = await _ingest(client, auth_headers, attributes={"state": "TX"})
+    rid = await _ingest_with_profile(client, auth_headers, email_domain="tx.cadencetests.io")
 
     first = await client.post(
         f"/api/workflows/{wid}/backfill",
-        json={"segment": {"attributes.state": "TX"}, "limit": 100},
+        json={"segment": {"email_domain": "tx.cadencetests.io"}, "limit": 100},
         headers=auth_headers,
     )
     assert first.status_code == 200
@@ -223,7 +239,7 @@ async def test_backfill_respects_cooldown(client, auth_headers):
 
     second = await client.post(
         f"/api/workflows/{wid}/backfill",
-        json={"segment": {"attributes.state": "TX"}, "limit": 100},
+        json={"segment": {"email_domain": "tx.cadencetests.io"}, "limit": 100},
         headers=auth_headers,
     )
     assert second.status_code == 200, second.text
