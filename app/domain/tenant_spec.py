@@ -7,6 +7,7 @@ parsing is app/services/tenant_mapping.py's job.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 
@@ -41,7 +42,7 @@ class ConsentSpec:
     source_label: str
     text: FieldSpec
     captured_at: FieldSpec
-    optional: dict[str, FieldSpec]
+    optional: Mapping[str, FieldSpec]
 
 
 @dataclass(frozen=True)
@@ -50,7 +51,7 @@ class TenantMapping:
     email_source: str
     external_id_source: str | None
     vertical_source: str | None
-    fields: dict[str, FieldSpec]
+    fields: Mapping[str, FieldSpec]
     repeating: tuple[RepeatingSpec, ...]
     derived: tuple[DerivedSpec, ...]
     consent: ConsentSpec
