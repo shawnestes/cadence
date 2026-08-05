@@ -79,6 +79,12 @@ def test_normalize_state(raw, expected):
         (None, None),
         ("1799", None),   # out of range
         ("2200", None),
+        ("inf", None),
+        ("Infinity", None),
+        ("-inf", None),
+        ("1e400", None),  # overflows float, becomes inf
+        ("nan", None),
+        (2019.7, None),   # fractional year is corruption, not truncation
     ],
 )
 def test_normalize_year(raw, expected):

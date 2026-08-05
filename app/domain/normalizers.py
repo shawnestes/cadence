@@ -9,6 +9,7 @@ No FastAPI, no SQLAlchemy: these are unit-testable without a DB.
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Callable
 
@@ -118,12 +119,23 @@ def normalize_phone_e164(value: object) -> str | None:
 
 
 def normalize_year(value: object) -> int | None:
+    """Whole calendar years only.
+
+    Rejects non-finite floats ("inf", "nan", overflowing strings like
+    "1e400") and fractional years ("2019.7") rather than truncating them —
+    both indicate corrupted source data, not a usable year.
+    """
     s = _text(value)
     if s is None:
         return None
     try:
-        year = int(float(s))
+        year_float = float(s)
     except (TypeError, ValueError):
+        return None
+    if not math.isfinite(year_float):
+        return None
+    year = int(year_float)
+    if year != year_float:
         return None
     return year if _MIN_YEAR <= year <= _MAX_YEAR else None
 
