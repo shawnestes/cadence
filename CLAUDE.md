@@ -66,6 +66,12 @@ uv run pytest
 # To reload immediately without waiting for nightly, restart the workers process.
 ```
 
+```bash
+# Bulk-load tenant records (rejects file holds PII — it is gitignored)
+uv run python -m app.cli.load_records --tenant otto --file leads.csv --vertical auto
+uv run python -m app.cli.load_records --tenant otto --file leads.csv --vertical auto --dry-run
+```
+
 ## Things that will trip you up
 
 - **SES sandbox vs production.** New SES accounts start in sandbox (200/day, only verified addresses). Production access must be requested separately. Build assumes production access; in dev, point at the sandbox and use verified test addresses.
