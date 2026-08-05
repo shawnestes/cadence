@@ -175,6 +175,60 @@ async def test_suppressed_contact_is_not_resurrected():
 
 
 @pytest.mark.asyncio
+async def test_suppression_ratchet_survives_after_suppressions_row_is_removed():
+    """Falsifies a non-ratcheted implementation.
+
+    The previous test leaves the suppressions row in place, so a fresh
+    per-call lookup alone (with no ratchet on the contact_profile write)
+    would still pass it. This test deletes the suppressions row before the
+    final re-import, so only a real ratchet (GREATEST/COALESCE against the
+    already-stored row) keeps the profile locked at opted-out.
+    """
+    email = f"unsupp-{uuid.uuid4()}@cadencetests.io"
+    async with async_session_factory() as s:
+        await ingest_record(
+            s, tenant=_TENANT, vertical="auto",
+            record=_record(email, captured_at=_NOW), now=_NOW,
+        )
+        await s.commit()
+        await s.execute(
+            text(
+                "INSERT INTO suppressions (id, tenant, email, reason, source)"
+                " VALUES (gen_random_uuid(), :t, :e, 'unsubscribe', 'one_click')"
+            ),
+            {"t": _TENANT, "e": email},
+        )
+        await s.commit()
+
+        # Lock the profile at consent_state=2 / suppressed_at set.
+        await ingest_record(
+            s, tenant=_TENANT, vertical="auto",
+            record=_record(email, captured_at=_NOW + timedelta(days=2)), now=_NOW,
+        )
+        await s.commit()
+
+        # Remove the suppression entirely — a per-call lookup would now see
+        # this contact as not suppressed.
+        await s.execute(
+            text("DELETE FROM suppressions WHERE tenant = :t AND email = :e"),
+            {"t": _TENANT, "e": email},
+        )
+        await s.commit()
+
+        # Re-import with a fresh, opted-in record.
+        await ingest_record(
+            s, tenant=_TENANT, vertical="auto",
+            record=_record(email, captured_at=_NOW + timedelta(days=4)), now=_NOW,
+        )
+        await s.commit()
+
+        p = await _profile(s, email)
+        assert p["consent_state"] == 2
+        assert p["suppressed_at"] is not None
+        assert p["sendable"] is False
+
+
+@pytest.mark.asyncio
 async def test_older_consent_does_not_regress_consent_at():
     email = f"older-{uuid.uuid4()}@cadencetests.io"
     newer = _NOW

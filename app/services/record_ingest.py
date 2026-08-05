@@ -96,17 +96,6 @@ _SELECT_EXISTING_PROOF = text(
     """
 )
 
-_IS_SUPPRESSED = text(
-    """
-    SELECT EXISTS (
-        SELECT 1 FROM suppressions WHERE tenant = :tenant AND email = :email
-    ) OR EXISTS (
-        SELECT 1 FROM recipients
-         WHERE tenant = :tenant AND email = :email AND status = 'suppressed'
-    ) AS suppressed
-    """
-)
-
 _LOOKUP_DOMAIN_PROVIDER = text(
     """
     SELECT mailbox_provider, reputation_group
@@ -121,10 +110,34 @@ _UPSERT_PROFILE = text(
         (contact_id, tenant, channel, email_domain, mailbox_provider,
          reputation_group, consent_state, consent_at, consent_proof_id,
          suppressed_at, suppress_reason, updated_at)
-    VALUES
-        (:contact_id, :tenant, :channel, :email_domain, :mailbox_provider,
-         :reputation_group, :consent_state, :consent_at, :consent_proof_id,
-         :suppressed_at, :suppress_reason, :now)
+    SELECT
+        :contact_id, :tenant, :channel, :email_domain, :mailbox_provider,
+        :reputation_group,
+        CASE WHEN sup.is_suppressed
+             THEN CAST(:consent_opted_out AS smallint)
+             ELSE CAST(:consent_opted_in AS smallint)
+        END,
+        :consent_at, :consent_proof_id,
+        CASE WHEN sup.is_suppressed THEN CAST(:now AS timestamptz) ELSE NULL END,
+        CASE WHEN sup.is_suppressed
+             THEN CAST(:suppress_reason AS smallint)
+             ELSE NULL
+        END,
+        :now
+    FROM (
+        -- Suppression is re-derived here, in the same statement as the write,
+        -- so the check and the write share one snapshot. A separate read
+        -- earlier in the transaction would leave a TOCTOU gap: a suppression
+        -- committed by another transaction between the read and this write
+        -- would be invisible to the read and the profile would be written
+        -- sendable for a contact that is, at write time, suppressed.
+        SELECT EXISTS (
+            SELECT 1 FROM suppressions WHERE tenant = :tenant AND email = :email
+        ) OR EXISTS (
+            SELECT 1 FROM recipients
+             WHERE tenant = :tenant AND id = :contact_id AND status = 'suppressed'
+        ) AS is_suppressed
+    ) sup
     ON CONFLICT (tenant, contact_id, channel) DO UPDATE SET
         email_domain     = EXCLUDED.email_domain,
         mailbox_provider = EXCLUDED.mailbox_provider,
@@ -244,12 +257,6 @@ async def ingest_record(
             await session.execute(_SELECT_EXISTING_PROOF, proof_params)
         ).scalar_one()
 
-    suppressed = (
-        await session.execute(
-            _IS_SUPPRESSED, {"tenant": tenant, "email": record.email}
-        )
-    ).scalar_one()
-
     domain = record.email.rsplit("@", 1)[1]
     mp, rg, unknown_domain = await _resolve_provider(session, tenant, domain)
 
@@ -258,15 +265,16 @@ async def ingest_record(
         {
             "contact_id": str(contact_id),
             "tenant": tenant,
+            "email": record.email,
             "channel": _CHANNEL_EMAIL,
             "email_domain": domain,
             "mailbox_provider": mp,
             "reputation_group": rg,
-            "consent_state": _CONSENT_OPTED_OUT if suppressed else _CONSENT_OPTED_IN,
+            "consent_opted_in": _CONSENT_OPTED_IN,
+            "consent_opted_out": _CONSENT_OPTED_OUT,
             "consent_at": record.consent.captured_at,
             "consent_proof_id": str(proof_id),
-            "suppressed_at": now if suppressed else None,
-            "suppress_reason": _SUPPRESS_REASON_UNSUBSCRIBE if suppressed else None,
+            "suppress_reason": _SUPPRESS_REASON_UNSUBSCRIBE,
             "now": now,
         },
     )
