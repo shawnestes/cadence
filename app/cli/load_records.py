@@ -16,7 +16,7 @@ import csv
 import json
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
+import uuid
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,15 +24,19 @@ from typing import Any
 
 import structlog
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api._enrollment import enroll_recipient
 from app.core.db import async_session_factory, engine
 from app.domain.record_mapping import (
     OUTCOME_OK,
     OUTCOME_QUARANTINE,
+    OUTCOME_REJECT,
+    MappedRow,
     map_row,
 )
 from app.domain.segment import matches as segment_matches
+from app.domain.tenant_spec import TenantMapping
 from app.models.recipient import Recipient
 from app.models.workflow import Workflow
 from app.services.record_ingest import (
@@ -46,6 +50,30 @@ from app.services.tenant_mapping import load_tenant_mapping
 log = structlog.get_logger(__name__)
 
 _ENROLL_CONFIRM_THRESHOLD = 1000
+
+# errors="replace" in read_rows silently substitutes this for any byte
+# sequence that can't decode as UTF-8 (e.g. a cp1252 file with no BOM).
+# Accepting a row containing it would store corrupted PII; reject instead.
+_REPLACEMENT_CHAR = "�"
+
+
+def _map_row_checked(raw: dict[str, Any], mapping: TenantMapping) -> MappedRow:
+    """map_row, but reject first if decoding already corrupted any value."""
+    bad_columns = sorted(
+        key
+        for key, value in raw.items()
+        if isinstance(value, str) and _REPLACEMENT_CHAR in value
+    )
+    if bad_columns:
+        return MappedRow(
+            outcome=OUTCOME_REJECT,
+            errors=(
+                "invalid encoding (unicode replacement character) in "
+                f"column(s): {', '.join(bad_columns)}",
+            ),
+            record=None,
+        )
+    return map_row(raw, mapping)
 
 
 def read_rows(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
@@ -83,7 +111,14 @@ async def _project_enrollment(tenant: str) -> int:
     return len(workflows)
 
 
-async def _enroll(session, tenant: str, contact_id, attributes: dict, vertical: str, now) -> int:
+async def _enroll(
+    session: AsyncSession,
+    tenant: str,
+    contact_id: uuid.UUID,
+    attributes: dict,
+    vertical: str,
+    now: datetime,
+) -> int:
     workflows = (
         await session.execute(
             select(Workflow)
@@ -167,10 +202,12 @@ async def run(args: argparse.Namespace) -> int:
                 **counters.as_dict(),
             )
 
-        async def _process(rows: list[tuple[int, dict[str, Any]]], session) -> None:
+        async def _process(
+            rows: list[tuple[int, dict[str, Any]]], session: AsyncSession
+        ) -> None:
             now = datetime.now(timezone.utc)
             for row_number, raw in rows:
-                mapped = map_row(raw, mapping)
+                mapped = _map_row_checked(raw, mapping)
                 if mapped.outcome == OUTCOME_OK:
                     status, unknown = await ingest_record(
                         session,
@@ -225,7 +262,7 @@ async def run(args: argparse.Namespace) -> int:
             if args.limit and counters.read > args.limit:
                 break
             if args.dry_run:
-                mapped = map_row(raw, mapping)
+                mapped = _map_row_checked(raw, mapping)
                 if mapped.outcome == OUTCOME_OK:
                     counters.loaded += 1
                 elif mapped.outcome == OUTCOME_QUARANTINE:
@@ -298,31 +335,12 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
 
     async def _main() -> int:
-        # engine is a module-level singleton (app/core/db.py); its connection
-        # pool may hold connections opened on a different event loop than the
-        # one this call runs on (e.g. the test suite's session loop, when
-        # main() is driven from a separate thread below). asyncpg connections
-        # are loop-bound, so reusing one across loops raises "attached to a
-        # different loop". dispose(close=False) drops the pool's reference to
-        # those without touching them (safe from any loop) and swaps in a
-        # fresh pool that only ever sees connections opened on *this* loop.
-        await engine.dispose(close=False)
         try:
             return await run(args)
         finally:
             await engine.dispose()
 
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        # Normal CLI invocation: no loop yet, so asyncio.run() owns one.
-        return asyncio.run(_main())
-    else:
-        # main() was called synchronously from code already running inside an
-        # event loop (e.g. the test suite's session-scoped loop). asyncio.run()
-        # cannot nest, so drive a fresh loop on a separate thread instead.
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(asyncio.run, _main()).result()
+    return asyncio.run(_main())
 
 
 if __name__ == "__main__":

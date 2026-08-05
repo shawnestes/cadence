@@ -22,9 +22,16 @@ flush_unknown_domains call inserts for the shared cadencetests.io test
 domain. Without this, that row survives into tests/services/test_record_ingest.py,
 which asserts cadencetests.io is *unclassified* — a real cross-file pollution
 this suite hit before the cleanup was added here.
+
+flush_unknown_domains is additionally stubbed to a no-op by default (see
+_stub_flush_unknown_domains below) so tests don't incidentally hit the real
+DNS-enqueue / domain_provider-insert path at all. The domain_provider purge
+above stays as a backstop for any test that explicitly re-enables the real
+flush and needs it exercised end to end.
 """
 from __future__ import annotations
 
+import pytest
 import pytest_asyncio
 from sqlalchemy import text
 
@@ -125,3 +132,22 @@ async def _per_test_purge_segmentation():
     """
     yield
     await _purge_segmentation_rows()
+
+
+@pytest.fixture(autouse=True)
+def _stub_flush_unknown_domains(monkeypatch):
+    """Default CLI tests away from the real MX-enqueue/DNS path.
+
+    app.cli.load_records.flush_unknown_domains performs a real (unmocked)
+    DNS-backed domain_provider insert. Most CLI tests have nothing to do with
+    that path and shouldn't incidentally hit real DNS or mutate
+    domain_provider; tests that genuinely want to exercise it should
+    monkeypatch it back explicitly (a real dependency injection point, not a
+    global) and clean up after themselves.
+    """
+    import app.cli.load_records as load_records_module
+
+    async def _noop(tenant: str, domains: set[str], *, concurrency: int = 50) -> None:
+        return None
+
+    monkeypatch.setattr(load_records_module, "flush_unknown_domains", _noop)

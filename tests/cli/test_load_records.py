@@ -1,7 +1,19 @@
-"""End-to-end CLI tests over a temporary CSV."""
+"""End-to-end CLI tests over a temporary CSV.
+
+The async tests call ``run()`` directly with a hand-built argparse.Namespace
+rather than going through ``main()``. ``main()`` wraps ``run()`` in its own
+``asyncio.run()`` call, which cannot be invoked from inside a running event
+loop (these tests already run on pytest-asyncio's session-scoped loop) and,
+when routed through a helper thread instead, was observed to leave the test
+process hanging at teardown. Calling ``run()`` directly sidesteps both:
+no nested loop, no extra thread, no cross-loop connection-pool sharing.
+``main()``'s own responsibility — argv parsing plus the asyncio.run/dispose
+wrapper — is intentionally thin and is not separately covered here.
+"""
 
 from __future__ import annotations
 
+import argparse
 import csv
 import uuid
 from pathlib import Path
@@ -9,7 +21,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import text
 
-from app.cli.load_records import main, read_rows
+from app.cli.load_records import read_rows, run
 from app.core.db import async_session_factory
 
 _TENANT = "otto"
@@ -45,6 +57,24 @@ def _write_csv(path: Path, rows: list[dict[str, str]], *, encoding: str = "utf-8
         writer.writerows(rows)
 
 
+def _args(**overrides) -> argparse.Namespace:
+    """Build the Namespace _parse_args would produce, for calling run() directly."""
+    defaults = dict(
+        tenant=_TENANT,
+        file="",
+        vertical="auto",
+        batch_size=1000,
+        errors_out="",
+        limit=0,
+        max_error_rate=0.25,
+        enroll=False,
+        yes=False,
+        dry_run=False,
+    )
+    defaults.update(overrides)
+    return argparse.Namespace(**defaults)
+
+
 def test_read_rows_handles_bom_and_embedded_newlines(tmp_path: Path):
     path = tmp_path / "leads.csv"
     _write_csv(
@@ -74,11 +104,8 @@ async def test_cli_loads_quarantines_and_rejects(tmp_path: Path, capsys):
         ],
     )
 
-    code = main(
-        [
-            "--tenant", _TENANT, "--file", str(path), "--vertical", "auto",
-            "--errors-out", str(errors_out), "--max-error-rate", "1.0",
-        ]
+    code = await run(
+        _args(file=str(path), errors_out=str(errors_out), max_error_rate=1.0)
     )
     assert code == 0
 
@@ -122,11 +149,8 @@ async def test_dry_run_touches_no_db(tmp_path: Path):
     path = tmp_path / "leads.csv"
     _write_csv(path, [_row(email)])
 
-    code = main(
-        [
-            "--tenant", _TENANT, "--file", str(path), "--vertical", "auto",
-            "--errors-out", str(tmp_path / "r.csv"), "--dry-run",
-        ]
+    code = await run(
+        _args(file=str(path), errors_out=str(tmp_path / "r.csv"), dry_run=True)
     )
     assert code == 0
 
@@ -144,11 +168,8 @@ async def test_dry_run_touches_no_db(tmp_path: Path):
 async def test_exit_code_2_when_error_rate_exceeded(tmp_path: Path):
     path = tmp_path / "leads.csv"
     _write_csv(path, [_row("bad-one"), _row("bad-two"), _row(f"ok-{uuid.uuid4()}@cadencetests.io")])
-    code = main(
-        [
-            "--tenant", _TENANT, "--file", str(path), "--vertical", "auto",
-            "--errors-out", str(tmp_path / "r.csv"), "--max-error-rate", "0.25",
-        ]
+    code = await run(
+        _args(file=str(path), errors_out=str(tmp_path / "r.csv"), max_error_rate=0.25)
     )
     assert code == 2
 
@@ -161,12 +182,7 @@ async def test_duplicate_email_in_one_batch_last_wins(tmp_path: Path):
         path,
         [_row(email, city="Austin"), _row(email, city="Dallas")],
     )
-    code = main(
-        [
-            "--tenant", _TENANT, "--file", str(path), "--vertical", "auto",
-            "--errors-out", str(tmp_path / "r.csv"),
-        ]
-    )
+    code = await run(_args(file=str(path), errors_out=str(tmp_path / "r.csv")))
     assert code == 0
     async with async_session_factory() as s:
         attrs = (
@@ -176,3 +192,109 @@ async def test_duplicate_email_in_one_batch_last_wins(tmp_path: Path):
             )
         ).scalar_one()
     assert attrs["city"] == "Dallas"
+
+
+@pytest.mark.asyncio
+async def test_cp1252_row_is_rejected_not_stored_corrupted(tmp_path: Path):
+    """A cp1252-encoded file (no BOM) decodes with U+FFFD under utf-8-sig +
+    errors="replace". Storing that would silently corrupt PII, so the row
+    must be rejected instead — neither stored garbled nor silently dropped
+    into contact_quarantine without saying why.
+    """
+    email = f"cp1252-{uuid.uuid4()}@cadencetests.io"
+    path = tmp_path / "leads.csv"
+    errors_out = tmp_path / "r.csv"
+    _write_csv(
+        path,
+        [_row(email, first_name="Renée", last_name="Beauséjour")],
+        encoding="cp1252",
+    )
+
+    # Sanity check on the fixture itself: decoding as utf-8-sig really does
+    # produce the replacement character for this file.
+    decoded = list(read_rows(path))
+    assert len(decoded) == 1
+    assert "�" in decoded[0][1]["first_name"]
+
+    code = await run(
+        _args(file=str(path), errors_out=str(errors_out), max_error_rate=1.0)
+    )
+    assert code == 0
+
+    reject_rows = list(csv.DictReader(errors_out.open(newline="", encoding="utf-8")))
+    assert len(reject_rows) == 1
+    assert reject_rows[0]["outcome"] == "reject"
+    assert "first_name" in reject_rows[0]["errors"]
+    assert "last_name" in reject_rows[0]["errors"]
+
+    async with async_session_factory() as s:
+        count = (
+            await s.execute(
+                text("SELECT count(*) FROM recipients WHERE tenant=:t AND email=:e"),
+                {"t": _TENANT, "e": email},
+            )
+        ).scalar_one()
+    assert count == 0
+
+
+@pytest.mark.asyncio
+async def test_batch_failure_rolls_back_and_retries_rows_individually(
+    tmp_path: Path, monkeypatch
+):
+    """A statement-level failure partway through a batch must not lose the
+    other rows in that batch. Force a genuine failure (not a duplicate-key
+    upsert, which never raises) by making ingest_record blow up for one
+    specific email, and confirm: the other two rows in the same batch are
+    still committed, the bad row is counted rejected and lands in the
+    rejects file, and the process exits normally.
+    """
+    good1 = f"batchgood1-{uuid.uuid4()}@cadencetests.io"
+    bad = f"batchbad-{uuid.uuid4()}@cadencetests.io"
+    good2 = f"batchgood2-{uuid.uuid4()}@cadencetests.io"
+    path = tmp_path / "leads.csv"
+    errors_out = tmp_path / "r.csv"
+    _write_csv(path, [_row(good1), _row(bad), _row(good2)])
+
+    import app.cli.load_records as load_records_module
+
+    real_ingest_record = load_records_module.ingest_record
+
+    async def _flaky_ingest_record(session, *, tenant, vertical, record, now):
+        if record.email == bad:
+            raise RuntimeError("simulated statement failure")
+        return await real_ingest_record(
+            session, tenant=tenant, vertical=vertical, record=record, now=now
+        )
+
+    monkeypatch.setattr(load_records_module, "ingest_record", _flaky_ingest_record)
+
+    code = await run(
+        _args(file=str(path), errors_out=str(errors_out), max_error_rate=1.0)
+    )
+    assert code == 0
+
+    async with async_session_factory() as s:
+        good1_count = (
+            await s.execute(
+                text("SELECT count(*) FROM recipients WHERE tenant=:t AND email=:e"),
+                {"t": _TENANT, "e": good1},
+            )
+        ).scalar_one()
+        good2_count = (
+            await s.execute(
+                text("SELECT count(*) FROM recipients WHERE tenant=:t AND email=:e"),
+                {"t": _TENANT, "e": good2},
+            )
+        ).scalar_one()
+        bad_count = (
+            await s.execute(
+                text("SELECT count(*) FROM recipients WHERE tenant=:t AND email=:e"),
+                {"t": _TENANT, "e": bad},
+            )
+        ).scalar_one()
+    assert (good1_count, good2_count, bad_count) == (1, 1, 0)
+
+    reject_rows = list(csv.DictReader(errors_out.open(newline="", encoding="utf-8")))
+    error_rows = [r for r in reject_rows if r["outcome"] == "error"]
+    assert len(error_rows) == 1
+    assert bad in error_rows[0]["raw"]
