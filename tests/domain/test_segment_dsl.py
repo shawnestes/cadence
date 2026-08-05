@@ -417,3 +417,25 @@ def test_normalize_v3_is_null():
     seg = {"all": [{"field": "last_open_at", "op": "is_null"}]}
     result = normalize(seg)
     assert result == {"all": [{"field": "last_open_at", "is_null": True}]}
+
+
+def test_contains_matches_list_valued_attribute():
+    seg = {"all": [{"field": "attributes.vehicle_makes", "op": "contains", "value": "toyota"}]}
+    assert matches(seg, {"vehicle_makes": ["toyota", "honda"]}, "auto") is True
+    assert matches(seg, {"vehicle_makes": ["ford"]}, "auto") is False
+
+
+def test_contains_on_scalar_attribute_is_false_not_an_error():
+    seg = {"all": [{"field": "attributes.vehicle_makes", "op": "contains", "value": "toyota"}]}
+    assert matches(seg, {"vehicle_makes": "toyota"}, "auto") is False
+
+
+def test_contains_on_missing_attribute_is_false():
+    seg = {"all": [{"field": "attributes.vehicle_makes", "op": "contains", "value": "toyota"}]}
+    assert matches(seg, {}, "auto") is False
+
+
+def test_normalize_accepts_contains():
+    assert normalize(
+        {"all": [{"field": "attributes.vehicle_makes", "op": "contains", "value": "toyota"}]}
+    ) == {"all": [{"field": "attributes.vehicle_makes", "contains": "toyota"}]}

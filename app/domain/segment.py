@@ -65,6 +65,7 @@ _V3_OPERATORS = (
     "is_null",
     "is_not_null",
     "between",
+    "contains",
 )
 
 # All recognized operator names (used when "op" key is present).
@@ -479,6 +480,10 @@ def _eval_clause(
         return actual in clause["in"]
     if "not_in" in clause:
         return actual not in clause["not_in"]
+    if "contains" in clause:
+        # List membership. A scalar actual never "contains" anything — the
+        # scalar case is what `eq` is for.
+        return isinstance(actual, (list, tuple)) and clause["contains"] in actual
 
     # --- Null-check operators (stored as {op: True} internally) ---
     if "is_null" in clause:

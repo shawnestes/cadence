@@ -12,6 +12,7 @@ included — callers add ``cp.tenant = :tenant`` themselves.
 """
 from __future__ import annotations
 
+import re
 import structlog
 from datetime import datetime, timezone
 from typing import Any
@@ -119,6 +120,13 @@ class _ParamBag:
 # ---------------------------------------------------------------------------
 
 
+_ATTR_PREFIX = "attributes."
+_ATTR_KEY_RE = re.compile(r"^[a-z0-9_]{1,64}$")
+
+# Operators that compare numerically and therefore need a cast off jsonb text.
+_NUMERIC_OPS = frozenset({"gt", "gte", "lt", "lte", "between"})
+
+
 def _col(field: str) -> str:
     """Return the qualified ``cp.<column>`` expression for a DSL field name."""
     if field not in _CP_FIELDS:
@@ -126,8 +134,27 @@ def _col(field: str) -> str:
     return f"cp.{field}"
 
 
+def _attr_subquery(key: str, bag: "_ParamBag", *, as_json: bool) -> str:
+    """Correlated scalar subquery for a recipients.attributes key.
+
+    Returns the raw jsonb value when ``as_json`` (needed by jsonb_exists and
+    NULL checks), otherwise the text projection.  The key is bound as a
+    parameter, never interpolated.
+    """
+    if not _ATTR_KEY_RE.match(key):
+        raise ValueError(f"invalid attributes key: {key!r}")
+    p = bag.add(key)
+    op = "->" if as_json else "->>"
+    return (
+        f"(SELECT r.attributes {op} :{p} FROM recipients r"
+        f" WHERE r.id = cp.contact_id AND r.tenant = cp.tenant)"
+    )
+
+
 def _coerce_value(field: str, value: Any) -> Any:
     """Translate string values to smallint codes for coded fields."""
+    if field.startswith(_ATTR_PREFIX):
+        return value
     codes = _SMALLINT_FIELDS.get(field)
     if codes is None:
         return value
@@ -170,7 +197,22 @@ def _compile_clause(node: dict, bag: _ParamBag, now: datetime) -> str:
 
     # Field clause.
     field: str = node["field"]
-    col = _col(field)
+    is_attr = field.startswith(_ATTR_PREFIX)
+    if is_attr:
+        attr_key = field[len(_ATTR_PREFIX):]
+        # Validate eagerly so a bad key fails even for operators that build
+        # their own expression below.
+        if not _ATTR_KEY_RE.match(attr_key):
+            raise ValueError(f"invalid attributes key: {attr_key!r}")
+        op_name = next((k for k in node if k != "field"), "")
+        if op_name in _NUMERIC_OPS:
+            col = f"({_attr_subquery(attr_key, bag, as_json=False)})::numeric"
+        elif op_name in ("is_null", "is_not_null", "contains"):
+            col = _attr_subquery(attr_key, bag, as_json=True)
+        else:
+            col = _attr_subquery(attr_key, bag, as_json=False)
+    else:
+        col = _col(field)
 
     # --- Equality / set operators ---
     if "eq" in node:
@@ -192,6 +234,12 @@ def _compile_clause(node: dict, bag: _ParamBag, now: datetime) -> str:
         val = _coerce_value(field, node["not_in"])
         p = bag.add(val)
         return f"{col} != ALL(:{p})"
+
+    if "contains" in node:
+        p = bag.add(node["contains"])
+        # Function form, not the `?` operator: `?` collides with the driver's
+        # placeholder syntax.
+        return f"jsonb_exists({col}, :{p})"
 
     # --- Null-check operators ---
     if "is_null" in node:

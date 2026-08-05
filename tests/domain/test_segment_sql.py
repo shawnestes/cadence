@@ -174,3 +174,38 @@ def test_cable_compiles_to_the_seeded_cable_code():
     )
     assert 4 in params.values()
     assert 5 not in params.values()
+
+
+def test_attributes_numeric_field_compiles_to_a_cast_subquery():
+    sql, params = compile_segment(
+        {"all": [{"field": "attributes.vehicle_count", "op": "gte", "value": 2}]},
+        _DEFAULT_CONFIG,
+        include_unsendable=True,
+        acknowledges_cold=True,
+    )
+    assert "FROM recipients r" in sql
+    assert "r.id = cp.contact_id" in sql
+    assert "r.tenant = cp.tenant" in sql
+    assert "::numeric" in sql
+    assert "vehicle_count" in params.values()
+    assert 2 in params.values()
+
+
+def test_attributes_contains_compiles_to_jsonb_exists():
+    sql, params = compile_segment(
+        {"all": [{"field": "attributes.vehicle_makes", "op": "contains", "value": "toyota"}]},
+        _DEFAULT_CONFIG,
+        include_unsendable=True,
+        acknowledges_cold=True,
+    )
+    assert "jsonb_exists(" in sql
+    assert "?" not in sql  # the ? operator collides with driver placeholders
+    assert "toyota" in params.values()
+
+
+def test_attributes_key_is_validated():
+    with pytest.raises(ValueError, match="invalid attributes key"):
+        compile_segment(
+            {"all": [{"field": "attributes.bad key'; drop table", "op": "eq", "value": 1}]},
+            _DEFAULT_CONFIG,
+        )
