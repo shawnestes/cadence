@@ -1,0 +1,10 @@
+segments:
+  - key: winback_never_opened
+    name: "Winback — never opened, 5+ sends"
+    channel: email
+    acknowledges_cold: true
+    predicate:
+      all:
+        - {field: engagement_tier, op: eq, value: cold}
+        - none:
+            - {field: complaints_90d, op: gte, value: 1}

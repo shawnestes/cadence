@@ -85,8 +85,13 @@ def test_normalize_v2_nested_any_within_all():
 
 
 def test_normalize_v2_no_engagement_since_clause():
+    import warnings
     seg = {"all": [{"kind": "no_engagement_since", "window": "P60D"}]}
-    assert normalize(seg) == seg
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = normalize(seg)
+    assert result == {"all": [{"field": "last_open_at", "not_within": "60d"}]}
+    assert any(issubclass(w.category, DeprecationWarning) for w in caught)
 
 
 @pytest.mark.parametrize(
@@ -153,16 +158,20 @@ def test_matches_v2_before_missing_field_value_fails_closed():
 
 
 def test_matches_v2_no_engagement_since():
+    import warnings
     now = datetime(2026, 7, 21, tzinfo=timezone.utc)
+    # The kind clause is normalized to {field: last_open_at, not_within: 60d}.
+    # Pass last_open_at via contact_profile_kwargs so the not_within branch evaluates it.
     seg = {"all": [{"kind": "no_engagement_since", "window": "P60D"}]}
 
-    assert matches(seg, {}, last_engagement_at=None, now=now) is True
-    assert (
-        matches(seg, {}, last_engagement_at=now - timedelta(days=90), now=now) is True
-    )
-    assert (
-        matches(seg, {}, last_engagement_at=now - timedelta(days=10), now=now) is False
-    )
+    with warnings.catch_warnings(record=True):
+        warnings.simplefilter("always")
+        # None last_open_at -> not_within evaluates True (null treated as outside window)
+        assert matches(seg, {}, now=now, last_open_at=None) is True
+        # last_open_at 90 days ago -> outside 60d window -> True
+        assert matches(seg, {}, now=now, last_open_at=now - timedelta(days=90)) is True
+        # last_open_at 10 days ago -> within 60d window -> False
+        assert matches(seg, {}, now=now, last_open_at=now - timedelta(days=10)) is False
 
 
 def test_matches_v2_nested_all_any():

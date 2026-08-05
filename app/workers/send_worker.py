@@ -31,6 +31,7 @@ from app.core.unsub import UnsubPayload, get_unsub_signer, unsub_base_for_identi
 from app.domain.engagement import TIER_DORMANT, min_gap_for_tier
 from app.domain.rendering import MissingMergeTag, render_template
 from app.domain.timezone import next_window_open, timezone_for_state
+from app.models.campaign import Campaign
 from app.models.recipient import Recipient
 from app.models.send import Send
 from app.models.sending_identity import SendingIdentity
@@ -86,6 +87,49 @@ def _inject_unsub_text(body_text: str, url: str) -> str:
     if url in body_text:
         return body_text
     return body_text + f"\n\nUnsubscribe: {url}\n"
+
+
+# --- Segment helpers ---------------------------------------------------------
+
+
+async def _resolve_segment_recipient(
+    session: object,
+    segment_key: str,
+    recipient_id: uuid.UUID,
+    tenant: str,
+    recipients_by_id: dict[uuid.UUID, Recipient],
+) -> Recipient | None:
+    """Return the Recipient ORM object if the contact is in segment_member_current.
+
+    Returns None when the contact is absent from the view (suppressed, opted
+    out, or no longer in the segment).  The caller must treat None as a
+    compliance gate-out and fail the send.
+
+    Uses the pre-loaded ``recipients_by_id`` map to avoid an extra ORM query
+    when the segment check passes; the SQL check against the view is the only
+    additional query per send on the segment path.
+    """
+    row = (
+        await (session).execute(  # type: ignore[attr-defined]
+            text(
+                "SELECT r.id"
+                " FROM segment_member_current smc"
+                " JOIN recipients r ON r.id = smc.contact_id"
+                " WHERE smc.segment_key = :segment_key"
+                "   AND smc.contact_id = :recipient_id"
+                "   AND r.tenant = :tenant"
+                " LIMIT 1"
+            ),
+            {
+                "segment_key": segment_key,
+                "recipient_id": str(recipient_id),
+                "tenant": tenant,
+            },
+        )
+    ).first()
+    if row is None:
+        return None
+    return recipients_by_id.get(recipient_id)
 
 
 # --- Worker ------------------------------------------------------------------
@@ -187,17 +231,22 @@ async def run_once() -> dict[str, int]:
             .all()
         )
 
-        # Bulk-load templates and recipients referenced by this batch.
+        # Bulk-load templates, recipients, and campaigns referenced by this batch.
         template_ids = {s.template_id for s in send_rows}
         recipient_ids = {s.recipient_id for s in send_rows}
+        campaign_ids = {s.campaign_id for s in send_rows}
         tmpl_rows = (
             await session.execute(select(Template).where(Template.id.in_(template_ids)))
         ).scalars().all()
         rcp_rows = (
             await session.execute(select(Recipient).where(Recipient.id.in_(recipient_ids)))
         ).scalars().all()
+        campaign_rows = (
+            await session.execute(select(Campaign).where(Campaign.id.in_(campaign_ids)))
+        ).scalars().all()
         templates_by_id = {t.id: t for t in tmpl_rows}
         recipients_by_id = {r.id: r for r in rcp_rows}
+        campaigns_by_id: dict[uuid.UUID, Campaign] = {c.id: c for c in campaign_rows}
 
         # Load every sending identity referenced by this batch once (grouped
         # by id, SPEC_ADDENDUM_003 §4) rather than per-send. Sends with a
@@ -274,7 +323,30 @@ async def run_once() -> dict[str, int]:
 
         for send in send_rows:
             processed += 1
-            recipient = recipients_by_id.get(send.recipient_id)
+
+            campaign = campaigns_by_id.get(send.campaign_id)
+            segment_key = campaign.segment_key if campaign is not None else None
+
+            if segment_key is not None:
+                recipient = await _resolve_segment_recipient(
+                    session, segment_key, send.recipient_id, send.tenant, recipients_by_id
+                )
+                if recipient is None:
+                    send.status = "failed"
+                    send.failure_reason = "not_in_segment_member_current"
+                    failed += 1
+                    await session.commit()
+                    log.info(
+                        "send_worker.segment_gated_out",
+                        send_id=str(send.id),
+                        recipient_id=str(send.recipient_id),
+                        tenant=send.tenant,
+                        campaign_id=str(send.campaign_id),
+                        segment_key=segment_key,
+                    )
+                    continue
+            else:
+                recipient = recipients_by_id.get(send.recipient_id)
 
             if recipient is not None:
                 # (a) Engagement-gap.
@@ -498,6 +570,7 @@ async def run_once() -> dict[str, int]:
                     "variant_label": send.variant_label,
                     "tenant": send.tenant,
                 },
+                feedback_id=f"{send.campaign_id}:{send.tenant}",
             )
 
             # (k) Dispatch.

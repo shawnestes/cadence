@@ -9,6 +9,7 @@ from app.api import (
     health,
     ingest,
     metrics,
+    origin_platform,
     recipients,
     segments,
     sending_identities,
@@ -40,6 +41,7 @@ app.include_router(health.router)
 app.include_router(metrics.router)
 app.include_router(webhooks.router)
 app.include_router(unsub.router)
+app.include_router(origin_platform.router, prefix="/ingest")
 app.include_router(
     ingest.router,
     prefix="/api",

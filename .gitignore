@@ -14,3 +14,7 @@ htmlcov/
 .ruff_cache/
 .idea/
 .git.empty-stub-bak/
+
+# Claude Code local state
+.claude/worktrees/
+.claude/settings.local.json

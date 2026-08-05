@@ -1,0 +1,8 @@
+segments:
+  - key: gmail_clickers_90d
+    name: "Gmail — confirmed click in last 90 days"
+    channel: email
+    predicate:
+      all:
+        - {field: mailbox_provider, op: eq,  value: gmail}
+        - {field: clicks_90d,       op: gte, value: 1}

@@ -14,6 +14,7 @@ class OutboundMessage:
     list_unsubscribe: str | None = None
     list_unsubscribe_post: bool = True
     message_tags: dict[str, str] = field(default_factory=dict)
+    feedback_id: str | None = None
 
 
 @dataclass(slots=True)
