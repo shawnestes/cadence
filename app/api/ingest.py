@@ -1,17 +1,26 @@
 from datetime import datetime, timezone
 
 import structlog
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import literal_column, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api._enrollment import EnrollmentOutcome, enroll_recipient
 from app.core.db import get_db
+from app.domain.record_mapping import OUTCOME_OK, OUTCOME_QUARANTINE, map_row
 from app.domain.segment import matches as segment_matches
 from app.models.recipient import Recipient
 from app.models.workflow import Workflow
 from app.schemas.recipient import RecipientIngestIn, RecipientIngestOut
+from app.schemas.records import RecordBatchIn, RecordBatchOut, RecordResult
+from app.services.record_ingest import (
+    IngestCounters,
+    flush_unknown_domains,
+    ingest_record,
+    quarantine_row,
+)
+from app.services.tenant_mapping import load_tenant_mapping
 
 router = APIRouter(tags=["ingest"])
 
@@ -125,3 +134,59 @@ async def ingest_recipient(
         status=row.status,
         created=bool(row.created),
     )
+
+
+@router.post("/ingest/records/batch", response_model=RecordBatchOut)
+async def ingest_records_batch(
+    payload: RecordBatchIn,
+    db: AsyncSession = Depends(get_db),
+) -> RecordBatchOut:
+    """Bulk record ingest. Same service the CLI uses (spec §11)."""
+    if payload.enroll:
+        raise HTTPException(400, "enroll is not supported on the batch endpoint yet")
+
+    mapping = load_tenant_mapping(payload.tenant)
+    now = datetime.now(timezone.utc)
+    counters = IngestCounters()
+    results: list[RecordResult] = []
+    unknown_domains: set[str] = set()
+
+    for index, raw in enumerate(payload.records):
+        counters.read += 1
+        mapped = map_row(raw, mapping)
+        if mapped.outcome == OUTCOME_OK:
+            status, unknown = await ingest_record(
+                db,
+                tenant=payload.tenant,
+                vertical=payload.vertical,
+                record=mapped.record,
+                now=now,
+            )
+            if unknown:
+                unknown_domains.add(unknown)
+            if status == "created":
+                counters.loaded += 1
+            else:
+                counters.updated += 1
+            results.append(RecordResult(index=index, status=status))
+        elif mapped.outcome == OUTCOME_QUARANTINE:
+            await quarantine_row(
+                db,
+                tenant=payload.tenant,
+                reason="; ".join(mapped.errors),
+                raw_row=raw,
+                now=now,
+            )
+            counters.quarantined += 1
+            results.append(
+                RecordResult(index=index, status="quarantined", errors=list(mapped.errors))
+            )
+        else:
+            counters.rejected += 1
+            results.append(
+                RecordResult(index=index, status="rejected", errors=list(mapped.errors))
+            )
+
+    await db.commit()
+    await flush_unknown_domains(payload.tenant, unknown_domains)
+    return RecordBatchOut(results=results, counters=counters.as_dict())
