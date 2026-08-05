@@ -30,5 +30,5 @@ consent:
   captured_at: {from: tcpa_consent_at}
   source_url:  {from: consent_url, required: false}
   form_id:     {from: lead_id,     required: false}
-  ip:          {from: consent_ip,  required: false}
+  ip:          {from: consent_ip,  required: false, normalize: ip}
   user_agent:  {from: consent_ua,  required: false}

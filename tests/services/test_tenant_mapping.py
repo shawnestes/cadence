@@ -153,6 +153,28 @@ def test_repeating_max_non_int_raises(tmp_path: Path):
         load_tenant_mapping("acme", mappings_dir=tmp_path)
 
 
+@pytest.mark.parametrize("key", ["text", "captured_at"])
+def test_consent_text_or_captured_at_normalize_raises(tmp_path: Path, key: str):
+    """Final-review finding: `normalize:` on consent.text/captured_at is
+    parsed into a FieldSpec but map_row always hardcodes no-normalizer for
+    these two fields, so a tenant author who sets one gets a silent no-op.
+    Reject the config outright instead.
+    """
+    (tmp_path / "acme.yaml").write_text(
+        "tenant: acme\n"
+        "identity:\n  email: email\n"
+        "fields: {}\n"
+        "consent:\n"
+        "  channels: [1]\n"
+        "  source_label: acme\n"
+        f"  {key}: {{from: t, normalize: name}}\n"
+        + ("  captured_at: {from: c}\n" if key == "text" else "  text: {from: t2}\n"),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match=f"consent.{key}"):
+        load_tenant_mapping("acme", mappings_dir=tmp_path)
+
+
 def test_returned_fields_mapping_is_immutable():
     """Finding 5: the cache must not hand out mutable shared state."""
     m = load_tenant_mapping("otto")

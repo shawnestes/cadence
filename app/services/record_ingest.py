@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import asdict, dataclass
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from typing import Any
 
 import structlog
 from sqlalchemy import text
@@ -29,7 +31,14 @@ from app.domain.isp import (
     REPUTATION_GROUP_CODES,
     classify_domain_two_axis,
 )
-from app.domain.record_mapping import NormalizedRecord, disclosure_hash
+from app.domain.record_mapping import (
+    OUTCOME_OK,
+    OUTCOME_QUARANTINE,
+    NormalizedRecord,
+    disclosure_hash,
+    map_row,
+)
+from app.domain.tenant_spec import TenantMapping
 from app.models.base import uuid7
 
 log = structlog.get_logger(__name__)
@@ -300,6 +309,69 @@ async def quarantine_row(
             "raw": json.dumps(raw_row, default=str),
         },
     )
+
+
+@dataclass
+class RowOutcome:
+    """Result of dispatching one raw row through ingest_one_row."""
+
+    status: str  # "created" | "updated" | "quarantined" | "rejected"
+    errors: tuple[str, ...] = field(default_factory=tuple)
+    unknown_domain: str | None = None
+
+
+IngestRecordFn = Callable[..., Awaitable[tuple[str, str | None]]]
+QuarantineRowFn = Callable[..., Awaitable[None]]
+
+
+async def ingest_one_row(
+    raw: Mapping[str, Any],
+    session: AsyncSession,
+    *,
+    tenant: str,
+    vertical: str,
+    mapping: TenantMapping,
+    now: datetime,
+    ingest_record_fn: IngestRecordFn = ingest_record,
+    quarantine_row_fn: QuarantineRowFn = quarantine_row,
+) -> tuple[RowOutcome, NormalizedRecord | None]:
+    """Map one raw row and dispatch it: load, quarantine, or reject.
+
+    Shared by the CLI and the batch endpoint so the map_row -> ingest_record /
+    quarantine_row / reject dispatch and its counter bookkeeping cannot drift
+    between the two front doors. Returns the mapped record too (only non-None
+    on an "ok" outcome) since the CLI's --enroll step needs it.
+
+    This function never catches: a DB failure in ingest_record_fn propagates
+    to the caller unchanged. Isolating one bad row from its neighbours is the
+    caller's job, because the two front doors need different mechanisms —
+    the CLI already retries failed batches row-by-row on fresh sessions, and
+    the batch endpoint wraps each call in a savepoint. Swallowing errors here
+    would silently change the CLI's existing retry-and-report behavior.
+
+    ingest_record_fn / quarantine_row_fn default to this module's own
+    functions but are injectable so a caller can substitute its own
+    module-level reference (e.g. the CLI passing its own `ingest_record`
+    name) and have that override observed here, including when a test
+    monkeypatches that name on the caller's module.
+    """
+    mapped = map_row(raw, mapping)
+    if mapped.outcome == OUTCOME_OK:
+        assert mapped.record is not None
+        status, unknown = await ingest_record_fn(
+            session, tenant=tenant, vertical=vertical, record=mapped.record, now=now
+        )
+        return RowOutcome(status=status, unknown_domain=unknown), mapped.record
+    if mapped.outcome == OUTCOME_QUARANTINE:
+        await quarantine_row_fn(
+            session,
+            tenant=tenant,
+            reason="; ".join(mapped.errors),
+            raw_row=dict(raw),
+            now=now,
+        )
+        return RowOutcome(status="quarantined", errors=mapped.errors), None
+    return RowOutcome(status="rejected", errors=mapped.errors), None
 
 
 async def flush_unknown_domains(

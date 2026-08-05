@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
+import sqlalchemy.exc
 from sqlalchemy import text
 
 from app.core.db import async_session_factory
@@ -285,3 +286,74 @@ async def test_quarantine_row_writes_reason_and_raw():
             {"t": _TENANT, "e": "q@cadencetests.io"},
         )
         await s.commit()
+
+
+@pytest.mark.asyncio
+async def test_savepoint_isolates_a_genuine_db_rejection_from_sibling_rows():
+    """Final-review finding: a batch endpoint sharing one session across many
+    rows must not lose an entire good batch because one row's statement
+    fails at the database. This reproduces the reviewer's real failure — a
+    value CAST(:ip AS inet) rejects — directly against ingest_record (below
+    the tenant-mapping normalizer that now sanitizes bad IPs on the CSV/JSON
+    ingest path), so the DataError is genuine, not simulated.
+
+    Wrapping each row in `session.begin_nested()` (a SAVEPOINT) is the
+    mechanism the batch endpoint uses: on failure, exiting the savepoint
+    context rolls back only that row, and the session remains usable for
+    the rows that follow — proven here by good2 committing successfully
+    immediately after bad's DataError.
+    """
+    good1 = f"sp-good1-{uuid.uuid4()}@cadencetests.io"
+    bad = f"sp-bad-{uuid.uuid4()}@cadencetests.io"
+    good2 = f"sp-good2-{uuid.uuid4()}@cadencetests.io"
+
+    async with async_session_factory() as s:
+        async with s.begin_nested():
+            status, _ = await ingest_record(
+                s, tenant=_TENANT, vertical="auto",
+                record=_record(good1, captured_at=_NOW), now=_NOW,
+            )
+        assert status == "created"
+
+        raised = None
+        try:
+            async with s.begin_nested():
+                bad_consent = ConsentRecord(
+                    text="By submitting you agree to receive emails.",
+                    captured_at=_NOW,
+                    channels=(1,),
+                    ip="not-a-real-ip-address",
+                )
+                await ingest_record(
+                    s, tenant=_TENANT, vertical="auto",
+                    record=NormalizedRecord(
+                        email=bad, external_id=None, vertical=None,
+                        attributes={}, consent=bad_consent, consent_source="otto_tcpa",
+                    ),
+                    now=_NOW,
+                )
+        except sqlalchemy.exc.DBAPIError as exc:
+            raised = exc
+        assert raised is not None, "expected CAST(:ip AS inet) to raise on a bad literal"
+
+        # The session must still be usable here — that's the whole point.
+        status, _ = await ingest_record(
+            s, tenant=_TENANT, vertical="auto",
+            record=_record(good2, captured_at=_NOW), now=_NOW,
+        )
+        assert status == "created"
+        await s.commit()
+
+    async with async_session_factory() as s:
+        counts = (
+            await s.execute(
+                text(
+                    "SELECT"
+                    " (SELECT count(*) FROM recipients WHERE tenant=:t AND email=:g1) AS g1,"
+                    " (SELECT count(*) FROM recipients WHERE tenant=:t AND email=:bad) AS bad,"
+                    " (SELECT count(*) FROM recipients WHERE tenant=:t AND email=:g2) AS g2"
+                ),
+                {"t": _TENANT, "g1": good1, "bad": bad, "g2": good2},
+            )
+        ).mappings().one()
+    assert (counts["g1"], counts["bad"], counts["g2"]) == (1, 0, 1)

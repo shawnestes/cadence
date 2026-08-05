@@ -13,7 +13,7 @@ class RecordBatchIn(BaseModel):
 
 class RecordResult(BaseModel):
     index: int
-    status: Literal["created", "updated", "quarantined", "rejected"]
+    status: Literal["created", "updated", "quarantined", "rejected", "error"]
     errors: list[str] = []
 
 

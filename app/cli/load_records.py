@@ -36,6 +36,7 @@ from app.models.workflow import Workflow
 from app.services.record_ingest import (
     IngestCounters,
     flush_unknown_domains,
+    ingest_one_row,
     ingest_record,
     quarantine_row,
 )
@@ -238,53 +239,52 @@ async def run(args: argparse.Namespace) -> int:
         ) -> None:
             now = datetime.now(timezone.utc)
             for row_number, raw in rows:
-                mapped = map_row(raw, mapping)
-                if mapped.outcome == OUTCOME_OK:
-                    status, unknown = await ingest_record(
-                        session,
-                        tenant=args.tenant,
-                        vertical=args.vertical,
-                        record=mapped.record,
-                        now=now,
-                    )
-                    if unknown:
-                        unknown_domains.add(unknown)
-                    if status == "created":
-                        counters.loaded += 1
-                    else:
-                        counters.updated += 1
-                    if args.enroll:
-                        contact_id = (
-                            await session.execute(
-                                select(Recipient.id)
-                                .where(Recipient.tenant == args.tenant)
-                                .where(Recipient.email == mapped.record.email)
-                            )
-                        ).scalar_one()
-                        counters.enrolled += await _enroll(
-                            session,
-                            args.tenant,
-                            contact_id,
-                            mapped.record.attributes,
-                            args.vertical,
-                            now,
-                        )
-                elif mapped.outcome == OUTCOME_QUARANTINE:
-                    await quarantine_row(
-                        session,
-                        tenant=args.tenant,
-                        reason="; ".join(mapped.errors),
-                        raw_row=raw,
-                        now=now,
-                    )
+                # ingest_record_fn/quarantine_row_fn are passed explicitly
+                # (rather than relying on ingest_one_row's own defaults) so
+                # that monkeypatching this module's `ingest_record` name (as
+                # the batch-failure test does) is observed here too.
+                outcome, record = await ingest_one_row(
+                    raw,
+                    session,
+                    tenant=args.tenant,
+                    vertical=args.vertical,
+                    mapping=mapping,
+                    now=now,
+                    ingest_record_fn=ingest_record,
+                    quarantine_row_fn=quarantine_row,
+                )
+                if outcome.unknown_domain:
+                    unknown_domains.add(outcome.unknown_domain)
+                if outcome.status == "created":
+                    counters.loaded += 1
+                elif outcome.status == "updated":
+                    counters.updated += 1
+                elif outcome.status == "quarantined":
                     counters.quarantined += 1
                     errors.writerow(
-                        [row_number, "quarantine", "; ".join(mapped.errors), json.dumps(raw)]
+                        [row_number, "quarantine", "; ".join(outcome.errors), json.dumps(raw)]
                     )
                 else:
                     counters.rejected += 1
                     errors.writerow(
-                        [row_number, "reject", "; ".join(mapped.errors), json.dumps(raw)]
+                        [row_number, "reject", "; ".join(outcome.errors), json.dumps(raw)]
+                    )
+
+                if args.enroll and record is not None:
+                    contact_id = (
+                        await session.execute(
+                            select(Recipient.id)
+                            .where(Recipient.tenant == args.tenant)
+                            .where(Recipient.email == record.email)
+                        )
+                    ).scalar_one()
+                    counters.enrolled += await _enroll(
+                        session,
+                        args.tenant,
+                        contact_id,
+                        record.attributes,
+                        args.vertical,
+                        now,
                     )
 
         batch_start = 1

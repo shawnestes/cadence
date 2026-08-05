@@ -57,6 +57,13 @@ def _parse_consent(raw: Any) -> ConsentSpec:
     for key in ("text", "captured_at", "source_label"):
         if key not in raw:
             raise ValueError(f"consent: missing required key {key!r}")
+    for key in ("text", "captured_at"):
+        body = raw[key]
+        if isinstance(body, dict) and body.get("normalize") is not None:
+            raise ValueError(
+                f"consent.{key}: normalize is not supported here — "
+                f"consent {key} is never normalized"
+            )
     raw_channels = raw.get("channels", [1])
     if not isinstance(raw_channels, list):
         raise ValueError(

@@ -8,18 +8,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api._enrollment import EnrollmentOutcome, enroll_recipient
 from app.core.db import get_db
-from app.domain.record_mapping import OUTCOME_OK, OUTCOME_QUARANTINE, map_row
 from app.domain.segment import matches as segment_matches
 from app.models.recipient import Recipient
 from app.models.workflow import Workflow
 from app.schemas.recipient import RecipientIngestIn, RecipientIngestOut
 from app.schemas.records import RecordBatchIn, RecordBatchOut, RecordResult
-from app.services.record_ingest import (
-    IngestCounters,
-    flush_unknown_domains,
-    ingest_record,
-    quarantine_row,
-)
+from app.services.record_ingest import IngestCounters, flush_unknown_domains, ingest_one_row
 from app.services.tenant_mapping import load_tenant_mapping
 
 router = APIRouter(tags=["ingest"])
@@ -153,39 +147,45 @@ async def ingest_records_batch(
 
     for index, raw in enumerate(payload.records):
         counters.read += 1
-        mapped = map_row(raw, mapping)
-        if mapped.outcome == OUTCOME_OK:
-            status, unknown = await ingest_record(
-                db,
+        try:
+            # A statement failure (e.g. a value the DB rejects) poisons the
+            # session for anything after it. A SAVEPOINT scopes that damage
+            # to this one row: on error, SQLAlchemy rolls back to it on
+            # __aexit__, leaving `db` usable for the rows that follow within
+            # the same transaction and the same final commit below.
+            async with db.begin_nested():
+                outcome, _ = await ingest_one_row(
+                    raw,
+                    db,
+                    tenant=payload.tenant,
+                    vertical=payload.vertical,
+                    mapping=mapping,
+                    now=now,
+                )
+        except Exception as exc:  # noqa: BLE001 - isolate one bad row from the rest of the batch
+            counters.rejected += 1
+            log.warning(
+                "ingest.batch_row_failed",
                 tenant=payload.tenant,
-                vertical=payload.vertical,
-                record=mapped.record,
-                now=now,
+                index=index,
+                error=str(exc),
             )
-            if unknown:
-                unknown_domains.add(unknown)
-            if status == "created":
-                counters.loaded += 1
-            else:
-                counters.updated += 1
-            results.append(RecordResult(index=index, status=status))
-        elif mapped.outcome == OUTCOME_QUARANTINE:
-            await quarantine_row(
-                db,
-                tenant=payload.tenant,
-                reason="; ".join(mapped.errors),
-                raw_row=raw,
-                now=now,
-            )
+            results.append(RecordResult(index=index, status="error", errors=[str(exc)[:500]]))
+            continue
+
+        if outcome.unknown_domain:
+            unknown_domains.add(outcome.unknown_domain)
+        if outcome.status == "created":
+            counters.loaded += 1
+        elif outcome.status == "updated":
+            counters.updated += 1
+        elif outcome.status == "quarantined":
             counters.quarantined += 1
-            results.append(
-                RecordResult(index=index, status="quarantined", errors=list(mapped.errors))
-            )
         else:
             counters.rejected += 1
-            results.append(
-                RecordResult(index=index, status="rejected", errors=list(mapped.errors))
-            )
+        results.append(
+            RecordResult(index=index, status=outcome.status, errors=list(outcome.errors))
+        )
 
     await db.commit()
     await flush_unknown_domains(payload.tenant, unknown_domains)

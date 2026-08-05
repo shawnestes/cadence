@@ -9,6 +9,7 @@ No FastAPI, no SQLAlchemy: these are unit-testable without a DB.
 
 from __future__ import annotations
 
+import ipaddress
 import math
 import re
 from collections.abc import Callable
@@ -140,6 +141,29 @@ def normalize_year(value: object) -> int | None:
     return year if _MIN_YEAR <= year <= _MAX_YEAR else None
 
 
+def normalize_ip(value: object) -> str | None:
+    """Return a canonical IPv4/IPv6 literal, or None for anything invalid.
+
+    Never raises. A malformed consent-capture IP is corroborating evidence,
+    not the legally meaningful part of a consent proof (the disclosure text
+    and timestamp are) — losing the whole record over a bad IP is the wrong
+    tradeoff, so garbage becomes NULL instead of failing the write.
+    """
+    s = _text(value)
+    if s is None:
+        return None
+    if "%" in s:
+        # Scoped/zone-id IPv6 literals ("fe80::1%eth0") parse fine under
+        # ipaddress but Postgres's inet type has no zone-id syntax and
+        # rejects them outright — treat them as invalid here too rather
+        # than passing through a value the DB will refuse.
+        return None
+    try:
+        return str(ipaddress.ip_address(s))
+    except ValueError:
+        return None
+
+
 NORMALIZERS: dict[str, Callable[[object], object]] = {
     "email": normalize_email,
     "name": normalize_name,
@@ -147,4 +171,5 @@ NORMALIZERS: dict[str, Callable[[object], object]] = {
     "zip5": normalize_zip5,
     "phone_e164": normalize_phone_e164,
     "year": normalize_year,
+    "ip": normalize_ip,
 }

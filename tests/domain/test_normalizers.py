@@ -7,6 +7,7 @@ import pytest
 from app.domain.normalizers import (
     NORMALIZERS,
     normalize_email,
+    normalize_ip,
     normalize_name,
     normalize_phone_e164,
     normalize_state,
@@ -123,4 +124,25 @@ def test_normalize_email(raw, expected):
 
 
 def test_normalizers_registry_covers_every_yaml_name():
-    assert set(NORMALIZERS) == {"email", "name", "state", "zip5", "phone_e164", "year"}
+    assert set(NORMALIZERS) == {
+        "email", "name", "state", "zip5", "phone_e164", "year", "ip",
+    }
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("203.0.113.9", "203.0.113.9"),
+        ("2001:db8::1", "2001:db8::1"),
+        ("  203.0.113.9  ", "203.0.113.9"),
+        ("not-an-ip", None),
+        ("999.999.999.999", None),
+        ("", None),
+        (None, None),
+        # Valid per Python's ipaddress but Postgres inet has no zone-id
+        # syntax and rejects it — must be treated as invalid here too.
+        ("fe80::1%eth0", None),
+    ],
+)
+def test_normalize_ip(raw, expected):
+    assert normalize_ip(raw) == expected
