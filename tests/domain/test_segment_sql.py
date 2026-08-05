@@ -209,3 +209,26 @@ def test_attributes_key_is_validated():
             {"all": [{"field": "attributes.bad key'; drop table", "op": "eq", "value": 1}]},
             _DEFAULT_CONFIG,
         )
+
+
+def test_attributes_is_null_treats_absent_key_and_explicit_json_null_alike():
+    sql, params = compile_segment(
+        {"all": [{"field": "attributes.phone", "op": "is_null"}]},
+        _DEFAULT_CONFIG,
+        include_unsendable=True,
+        acknowledges_cold=True,
+    )
+    assert "IS NULL" in sql
+    assert "'null'::jsonb" in sql
+    assert "= 'null'::jsonb" in sql
+
+
+def test_attributes_is_not_null_excludes_absent_key_and_explicit_json_null():
+    sql, params = compile_segment(
+        {"all": [{"field": "attributes.phone", "op": "is_not_null"}]},
+        _DEFAULT_CONFIG,
+        include_unsendable=True,
+        acknowledges_cold=True,
+    )
+    assert "IS NOT NULL" in sql
+    assert "<> 'null'::jsonb" in sql

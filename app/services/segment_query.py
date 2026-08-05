@@ -243,9 +243,18 @@ def _compile_clause(node: dict, bag: _ParamBag, now: datetime) -> str:
 
     # --- Null-check operators ---
     if "is_null" in node:
+        if is_attr:
+            # Key-absent (SQL NULL) and key-present-with-explicit-JSON-null
+            # ('null'::jsonb) must both count as "is_null" — the record
+            # mapper writes explicit JSON nulls for unset optional fields
+            # (attributes is replaced wholesale on upsert), so that is the
+            # common case in production data, not an edge case.
+            return f"({col} IS NULL OR {col} = 'null'::jsonb)"
         return f"{col} IS NULL"
 
     if "is_not_null" in node:
+        if is_attr:
+            return f"({col} IS NOT NULL AND {col} <> 'null'::jsonb)"
         return f"{col} IS NOT NULL"
 
     # --- Numeric / datetime comparison operators ---

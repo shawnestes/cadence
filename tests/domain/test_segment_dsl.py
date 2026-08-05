@@ -439,3 +439,33 @@ def test_normalize_accepts_contains():
     assert normalize(
         {"all": [{"field": "attributes.vehicle_makes", "op": "contains", "value": "toyota"}]}
     ) == {"all": [{"field": "attributes.vehicle_makes", "contains": "toyota"}]}
+
+
+def test_is_null_true_when_attribute_key_absent():
+    seg = {"all": [{"field": "attributes.phone", "op": "is_null"}]}
+    assert matches(seg, {}, "auto") is True
+
+
+def test_is_null_true_when_attribute_present_but_explicit_none():
+    seg = {"all": [{"field": "attributes.phone", "op": "is_null"}]}
+    assert matches(seg, {"phone": None}, "auto") is True
+
+
+def test_is_null_false_when_attribute_has_a_value():
+    seg = {"all": [{"field": "attributes.phone", "op": "is_null"}]}
+    assert matches(seg, {"phone": "555-1234"}, "auto") is False
+
+
+def test_is_not_null_false_when_attribute_key_absent():
+    seg = {"all": [{"field": "attributes.phone", "op": "is_not_null"}]}
+    assert matches(seg, {}, "auto") is False
+
+
+def test_is_not_null_false_when_attribute_present_but_explicit_none():
+    seg = {"all": [{"field": "attributes.phone", "op": "is_not_null"}]}
+    assert matches(seg, {"phone": None}, "auto") is False
+
+
+def test_is_not_null_true_when_attribute_has_a_value():
+    seg = {"all": [{"field": "attributes.phone", "op": "is_not_null"}]}
+    assert matches(seg, {"phone": "555-1234"}, "auto") is True
