@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import codecs
 import csv
 import json
 import sys
@@ -28,15 +29,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api._enrollment import enroll_recipient
 from app.core.db import async_session_factory, engine
-from app.domain.record_mapping import (
-    OUTCOME_OK,
-    OUTCOME_QUARANTINE,
-    OUTCOME_REJECT,
-    MappedRow,
-    map_row,
-)
+from app.domain.record_mapping import OUTCOME_OK, OUTCOME_QUARANTINE, map_row
 from app.domain.segment import matches as segment_matches
-from app.domain.tenant_spec import TenantMapping
 from app.models.recipient import Recipient
 from app.models.workflow import Workflow
 from app.services.record_ingest import (
@@ -51,52 +45,89 @@ log = structlog.get_logger(__name__)
 
 _ENROLL_CONFIRM_THRESHOLD = 1000
 
-# errors="replace" in read_rows silently substitutes this for any byte
-# sequence that can't decode as UTF-8 (e.g. a cp1252 file with no BOM).
-# Accepting a row containing it would store corrupted PII; reject instead.
-_REPLACEMENT_CHAR = "�"
+# Probe size for encoding auto-detection: large enough that real files are
+# very unlikely to be entirely ASCII/valid-UTF-8 for this long and then
+# switch encodings, small enough to read cheaply up front.
+_PROBE_SIZE = 1024 * 1024  # 1 MiB
 
 
-def _map_row_checked(raw: dict[str, Any], mapping: TenantMapping) -> MappedRow:
-    """map_row, but reject first if decoding already corrupted any value."""
-    bad_columns = sorted(
-        key
-        for key, value in raw.items()
-        if isinstance(value, str) and _REPLACEMENT_CHAR in value
-    )
-    if bad_columns:
-        return MappedRow(
-            outcome=OUTCOME_REJECT,
-            errors=(
-                "invalid encoding (unicode replacement character) in "
-                f"column(s): {', '.join(bad_columns)}",
-            ),
-            record=None,
+class RowDecodingError(Exception):
+    """The resolved encoding failed to decode the file at some point.
+
+    Distinguished from a wrong initial guess (which _detect_encoding exists
+    to avoid): this is a byte sequence found mid-stream, past whatever was
+    checked (by probe or by the operator's own judgment), that doesn't
+    decode. Abort loudly rather than silently substituting a replacement
+    character, which would store corrupted PII.
+    """
+
+    def __init__(self, *, encoding: str, row_number: int, cause: UnicodeDecodeError) -> None:
+        self.encoding = encoding
+        self.row_number = row_number
+        self.cause = cause
+        super().__init__(
+            f"failed to decode input as {encoding!r} at or after row {row_number} "
+            f"(byte offset {cause.start} of the failing read): {cause.reason}. "
+            f"Re-run with an explicit --encoding if {encoding!r} is wrong for this file."
         )
-    return map_row(raw, mapping)
 
 
-def read_rows(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
+def _detect_encoding(path: Path) -> str:
+    """Guess "utf-8-sig" vs "cp1252" by probing the first _PROBE_SIZE bytes.
+
+    UTF-8 is self-validating: real-world cp1252 text containing accented
+    characters essentially never happens to also form valid UTF-8. A clean
+    probe decode means utf-8-sig (which also transparently strips a BOM, or
+    behaves as plain UTF-8 if there isn't one); a UnicodeDecodeError on the
+    probe means cp1252.
+
+    Uses an incremental decoder with final=False so a multi-byte UTF-8
+    sequence that happens to be split by the probe's chunk boundary isn't
+    mistaken for invalid input — only a byte sequence that can never be
+    valid UTF-8, regardless of what bytes might follow, raises.
+    """
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
+    with path.open("rb") as fh:
+        chunk = fh.read(_PROBE_SIZE)
+    try:
+        decoder.decode(chunk, final=False)
+    except UnicodeDecodeError:
+        return "cp1252"
+    return "utf-8-sig"
+
+
+def read_rows(
+    path: Path, encoding: str = "auto"
+) -> Iterator[tuple[int, dict[str, Any]]]:
     """Stream (row_number, row) from a .csv or .jsonl file.
 
-    utf-8-sig transparently handles a BOM or its absence; newline="" is
-    required by the csv module so embedded newlines inside quoted fields
-    survive on Windows.
+    encoding="auto" (the default) probes the file via _detect_encoding to
+    choose "utf-8-sig" or "cp1252"; an explicit encoding name is used
+    exactly as given, with no probing. Decoding is strict — a byte sequence
+    that can't decode raises RowDecodingError rather than silently
+    substituting the Unicode replacement character, which would store
+    corrupted PII. newline="" is required by the csv module so embedded
+    newlines inside quoted fields survive on Windows.
     """
+    resolved = _detect_encoding(path) if encoding == "auto" else encoding
     suffix = path.suffix.lower()
-    with path.open("r", newline="", encoding="utf-8-sig", errors="replace") as fh:
-        if suffix in (".jsonl", ".ndjson"):
-            for n, line in enumerate(fh, start=1):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    yield n, json.loads(line)
-                except json.JSONDecodeError as exc:
-                    yield n, {"__parse_error__": str(exc)}
-        else:
-            for n, row in enumerate(csv.DictReader(fh), start=1):
-                yield n, dict(row)
+    n = 0
+    try:
+        with path.open("r", newline="", encoding=resolved) as fh:
+            if suffix in (".jsonl", ".ndjson"):
+                for n, line in enumerate(fh, start=1):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        yield n, json.loads(line)
+                    except json.JSONDecodeError as exc:
+                        yield n, {"__parse_error__": str(exc)}
+            else:
+                for n, row in enumerate(csv.DictReader(fh), start=1):
+                    yield n, dict(row)
+    except UnicodeDecodeError as exc:
+        raise RowDecodingError(encoding=resolved, row_number=n + 1, cause=exc) from exc
 
 
 async def _project_enrollment(tenant: str) -> int:
@@ -207,7 +238,7 @@ async def run(args: argparse.Namespace) -> int:
         ) -> None:
             now = datetime.now(timezone.utc)
             for row_number, raw in rows:
-                mapped = _map_row_checked(raw, mapping)
+                mapped = map_row(raw, mapping)
                 if mapped.outcome == OUTCOME_OK:
                     status, unknown = await ingest_record(
                         session,
@@ -257,30 +288,39 @@ async def run(args: argparse.Namespace) -> int:
                     )
 
         batch_start = 1
-        for row_number, raw in read_rows(path):
-            counters.read += 1
-            if args.limit and counters.read > args.limit:
-                break
-            if args.dry_run:
-                mapped = _map_row_checked(raw, mapping)
-                if mapped.outcome == OUTCOME_OK:
-                    counters.loaded += 1
-                elif mapped.outcome == OUTCOME_QUARANTINE:
-                    counters.quarantined += 1
-                    errors.writerow(
-                        [row_number, "quarantine", "; ".join(mapped.errors), json.dumps(raw)]
-                    )
-                else:
-                    counters.rejected += 1
-                    errors.writerow(
-                        [row_number, "reject", "; ".join(mapped.errors), json.dumps(raw)]
-                    )
-                continue
-            batch.append((row_number, raw))
-            if len(batch) >= args.batch_size:
+        try:
+            for row_number, raw in read_rows(path, encoding=args.encoding):
+                counters.read += 1
+                if args.limit and counters.read > args.limit:
+                    break
+                if args.dry_run:
+                    mapped = map_row(raw, mapping)
+                    if mapped.outcome == OUTCOME_OK:
+                        counters.loaded += 1
+                    elif mapped.outcome == OUTCOME_QUARANTINE:
+                        counters.quarantined += 1
+                        errors.writerow(
+                            [row_number, "quarantine", "; ".join(mapped.errors), json.dumps(raw)]
+                        )
+                    else:
+                        counters.rejected += 1
+                        errors.writerow(
+                            [row_number, "reject", "; ".join(mapped.errors), json.dumps(raw)]
+                        )
+                    continue
+                batch.append((row_number, raw))
+                if len(batch) >= args.batch_size:
+                    await flush(batch, batch_start)
+                    batch = []
+                    batch_start = row_number + 1
+        except RowDecodingError as exc:
+            # Flush whatever already-decoded rows made it into the pending
+            # batch before aborting — they decoded fine and shouldn't be
+            # thrown away because a later byte in the file didn't.
+            if not args.dry_run:
                 await flush(batch, batch_start)
-                batch = []
-                batch_start = row_number + 1
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
         if not args.dry_run:
             await flush(batch, batch_start)
 
@@ -315,6 +355,15 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--file", required=True)
     parser.add_argument("--vertical", required=True, choices=["auto", "home"])
     parser.add_argument("--batch-size", type=int, default=1000)
+    parser.add_argument(
+        "--encoding",
+        default="auto",
+        help=(
+            "input file text encoding. 'auto' (default) probes the first "
+            "1 MiB for valid UTF-8 and falls back to cp1252; an explicit "
+            "codec name (e.g. cp1252) is used verbatim with no probing."
+        ),
+    )
     parser.add_argument(
         "--errors-out",
         default=str(
