@@ -19,6 +19,7 @@ import sys
 import time
 import uuid
 from collections.abc import Iterator
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -50,6 +51,38 @@ _ENROLL_CONFIRM_THRESHOLD = 1000
 # very unlikely to be entirely ASCII/valid-UTF-8 for this long and then
 # switch encodings, small enough to read cheaply up front.
 _PROBE_SIZE = 1024 * 1024  # 1 MiB
+
+
+@dataclass
+class _BatchEffects:
+    """Everything a batch would record if — and only if — its commit lands.
+
+    _process buffers here instead of mutating the run-wide counters, rejects
+    file and unknown-domain set directly. A batch that raises is rolled back
+    and every row retried individually, so side effects applied during the
+    doomed first pass would be counted (and written to the rejects CSV) twice
+    for each row that had already succeeded before the failing one.
+    """
+
+    loaded: int = 0
+    updated: int = 0
+    quarantined: int = 0
+    rejected: int = 0
+    enrolled: int = 0
+    error_rows: list[list[Any]] = field(default_factory=list)
+    unknown_domains: set[str] = field(default_factory=set)
+
+    def apply(
+        self, counters: IngestCounters, errors: Any, unknown_domains: set[str]
+    ) -> None:
+        counters.loaded += self.loaded
+        counters.updated += self.updated
+        counters.quarantined += self.quarantined
+        counters.rejected += self.rejected
+        counters.enrolled += self.enrolled
+        for row in self.error_rows:
+            errors.writerow(row)
+        unknown_domains.update(self.unknown_domains)
 
 
 class RowDecodingError(Exception):
@@ -205,7 +238,7 @@ async def run(args: argparse.Namespace) -> int:
             batch_began = time.monotonic()
             async with async_session_factory() as session:
                 try:
-                    await _process(rows, session)
+                    effects = await _process(rows, session)
                     await session.commit()
                 except Exception as exc:  # noqa: BLE001
                     # A failed statement poisons the session; without the
@@ -216,10 +249,12 @@ async def run(args: argparse.Namespace) -> int:
                         batch_start=batch_start,
                         error=str(exc),
                     )
+                    # The whole batch is gone, so nothing the doomed pass
+                    # buffered counts. Only the retries below are recorded.
                     for row in rows:
                         async with async_session_factory() as row_session:
                             try:
-                                await _process([row], row_session)
+                                row_effects = await _process([row], row_session)
                                 await row_session.commit()
                             except Exception as row_exc:  # noqa: BLE001
                                 await row_session.rollback()
@@ -227,6 +262,10 @@ async def run(args: argparse.Namespace) -> int:
                                 errors.writerow(
                                     [row[0], "error", str(row_exc)[:500], json.dumps(row[1])]
                                 )
+                            else:
+                                row_effects.apply(counters, errors, unknown_domains)
+                else:
+                    effects.apply(counters, errors, unknown_domains)
             log.info(
                 "load_records.batch_complete",
                 batch_start=batch_start,
@@ -236,7 +275,8 @@ async def run(args: argparse.Namespace) -> int:
 
         async def _process(
             rows: list[tuple[int, dict[str, Any]]], session: AsyncSession
-        ) -> None:
+        ) -> _BatchEffects:
+            effects = _BatchEffects()
             now = datetime.now(timezone.utc)
             for row_number, raw in rows:
                 # ingest_record_fn/quarantine_row_fn are passed explicitly
@@ -254,19 +294,19 @@ async def run(args: argparse.Namespace) -> int:
                     quarantine_row_fn=quarantine_row,
                 )
                 if outcome.unknown_domain:
-                    unknown_domains.add(outcome.unknown_domain)
+                    effects.unknown_domains.add(outcome.unknown_domain)
                 if outcome.status == "created":
-                    counters.loaded += 1
+                    effects.loaded += 1
                 elif outcome.status == "updated":
-                    counters.updated += 1
+                    effects.updated += 1
                 elif outcome.status == "quarantined":
-                    counters.quarantined += 1
-                    errors.writerow(
+                    effects.quarantined += 1
+                    effects.error_rows.append(
                         [row_number, "quarantine", "; ".join(outcome.errors), json.dumps(raw)]
                     )
                 else:
-                    counters.rejected += 1
-                    errors.writerow(
+                    effects.rejected += 1
+                    effects.error_rows.append(
                         [row_number, "reject", "; ".join(outcome.errors), json.dumps(raw)]
                     )
 
@@ -278,7 +318,7 @@ async def run(args: argparse.Namespace) -> int:
                             .where(Recipient.email == record.email)
                         )
                     ).scalar_one()
-                    counters.enrolled += await _enroll(
+                    effects.enrolled += await _enroll(
                         session,
                         args.tenant,
                         contact_id,
@@ -286,6 +326,7 @@ async def run(args: argparse.Namespace) -> int:
                         args.vertical,
                         now,
                     )
+            return effects
 
         batch_start = 1
         try:

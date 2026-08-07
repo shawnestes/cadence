@@ -387,3 +387,86 @@ async def test_batch_failure_rolls_back_and_retries_rows_individually(
     error_rows = [r for r in reject_rows if r["outcome"] == "error"]
     assert len(error_rows) == 1
     assert bad in error_rows[0]["raw"]
+
+
+@pytest.mark.asyncio
+async def test_batch_failure_does_not_double_count_rows_retried_after_rollback(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """Regression: a mid-batch failure must not inflate the summary counters
+    or duplicate rejects-file rows.
+
+    A batch that raises is rolled back wholesale and every row retried
+    individually. Rows that had already succeeded before the failing one get
+    processed twice, so any side effect applied during the doomed first pass
+    is recorded twice. Here row 1 succeeds, row 2 fails, row 3 is never
+    reached on the first pass; without buffering, row 1 is counted loaded
+    twice (loaded=3, loaded+rejected=4 > read=3) and a quarantined row would
+    appear twice in the rejects CSV.
+    """
+    good = f"dcgood-{uuid.uuid4()}@cadencetests.io"
+    bad = f"dcbad-{uuid.uuid4()}@cadencetests.io"
+    quarantined = f"dcquar-{uuid.uuid4()}@cadencetests.io"
+    path = tmp_path / "leads.csv"
+    errors_out = tmp_path / "r.csv"
+    # Row 1 loads, row 2 quarantines (no consent), row 3 blows up mid-batch.
+    # The failure is last so rows 1 and 2 are both already applied when it hits.
+    _write_csv(
+        path,
+        [
+            _row(good),
+            _row(quarantined, tcpa_text="", tcpa_consent_at=""),
+            _row(bad),
+        ],
+    )
+
+    import app.cli.load_records as load_records_module
+
+    real_ingest_record = load_records_module.ingest_record
+
+    async def _flaky_ingest_record(session, *, tenant, vertical, record, now):
+        if record.email == bad:
+            raise RuntimeError("simulated statement failure")
+        return await real_ingest_record(
+            session, tenant=tenant, vertical=vertical, record=record, now=now
+        )
+
+    monkeypatch.setattr(load_records_module, "ingest_record", _flaky_ingest_record)
+
+    code = await run(
+        _args(file=str(path), errors_out=str(errors_out), max_error_rate=1.0)
+    )
+    assert code == 0
+
+    summary = dict(
+        pair.split("=") for pair in capsys.readouterr().out.strip().splitlines()[-1].split()
+    )
+    counted = {k: int(v) for k, v in summary.items()}
+    assert counted["read"] == 3
+    assert counted["loaded"] == 1
+    assert counted["quarantined"] == 1
+    assert counted["rejected"] == 1
+    assert counted["updated"] == 0
+    # The real invariant: every row read is accounted for exactly once.
+    assert (
+        counted["loaded"] + counted["updated"] + counted["quarantined"] + counted["rejected"]
+        == counted["read"]
+    )
+
+    reject_rows = list(csv.DictReader(errors_out.open(newline="", encoding="utf-8")))
+    # One quarantine row and one error row — no duplicates from the retry pass.
+    assert len(reject_rows) == 2
+    assert [r["row_number"] for r in reject_rows] == ["2", "3"]
+    assert [r["outcome"] for r in reject_rows] == ["quarantine", "error"]
+
+    async with async_session_factory() as s:
+        persisted = (
+            await s.execute(
+                text(
+                    "SELECT count(*) FROM recipients "
+                    "WHERE tenant=:t AND email IN (:g, :b, :q)"
+                ),
+                {"t": _TENANT, "g": good, "b": bad, "q": quarantined},
+            )
+        ).scalar_one()
+    assert persisted == 1
