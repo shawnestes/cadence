@@ -283,6 +283,9 @@ class SESAdapter(ESPAdapter):
             if message.list_unsubscribe_post:
                 msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
 
+        if message.feedback_id:
+            msg["Feedback-ID"] = message.feedback_id
+
         # Plain text first, HTML second (multipart/alternative).
         msg.set_content(message.body_text or "")
         msg.add_alternative(message.body_html or "", subtype="html")

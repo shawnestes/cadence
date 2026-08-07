@@ -56,6 +56,22 @@ uv run pytest
 # Point tests elsewhere: set CADENCE_TEST_DATABASE_URL
 ```
 
+```
+# Segment authoring
+# Segments live under segments/<channel>/<name>.yaml (e.g. segments/email/yahoo_engaged.yaml).
+# Each file contains one or more segment definitions under the top-level `segments:` key.
+# Segments are loaded into segment_definition on startup (app startup calls load_segments)
+# and on every nightly profile_refresh pass.
+# A changed predicate triggers a full rebuild of that segment's membership on the next nightly run.
+# To reload immediately without waiting for nightly, restart the workers process.
+```
+
+```bash
+# Bulk-load tenant records (rejects file holds PII — it is gitignored)
+uv run python -m app.cli.load_records --tenant otto --file leads.csv --vertical auto
+uv run python -m app.cli.load_records --tenant otto --file leads.csv --vertical auto --dry-run
+```
+
 ## Things that will trip you up
 
 - **SES sandbox vs production.** New SES accounts start in sandbox (200/day, only verified addresses). Production access must be requested separately. Build assumes production access; in dev, point at the sandbox and use verified test addresses.
@@ -64,3 +80,4 @@ uv run pytest
 - **Materialized view refresh.** `REFRESH MATERIALIZED VIEW CONCURRENTLY` requires a unique index. The spec includes one — don't drop it.
 - **Workflow versioning.** `journeys.workflow_version` pins the version at entry. If a workflow is edited mid-flight for some recipients, those recipients keep using the old version. Don't try to migrate them.
 - **Idempotency on ingest.** Recipients ingestion is idempotent on email. Don't create duplicate journeys if the same lead is re-ingested while already in a workflow.
+- **`no_engagement_since` deprecation.** `no_engagement_since` clauses in older segment YAML are automatically migrated at load time to a `not_within` predicate on `last_open_at`. A deprecation warning is logged; update the YAML to silence it.

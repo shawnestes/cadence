@@ -1,7 +1,11 @@
+import hashlib
+import json
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
-from pydantic import field_validator
+import yaml
+from pydantic import BaseModel, ConfigDict, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,9 +16,9 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    @field_validator("alert_tenants", mode="before")
+    @field_validator("alert_tenants", "apple_proxy_ip_ranges", "known_scanner_uas", mode="before")
     @classmethod
-    def _parse_alert_tenants(cls, v: Any) -> list[str]:
+    def _parse_csv_list(cls, v: Any) -> list[str]:
         if isinstance(v, str):
             return [t.strip() for t in v.split(",") if t.strip()]
         return v
@@ -36,6 +40,7 @@ class Settings(BaseSettings):
     ses_managed_pool_name: str | None = None
     sns_topic_arn_ses_events: str | None = None
     sns_verify_signatures: bool = True
+    sqs_event_queue_url: str | None = None
 
     # Unsub
     unsub_signing_key: str
@@ -80,9 +85,91 @@ class Settings(BaseSettings):
     alert_monitor_interval_seconds: int = 300
     alert_eval_window: str = "24h"
     slack_webhook_url: str | None = None
-    alert_tenants: list[str] = ["otto"]
+    alert_tenants: str | list[str] = ["otto"]
+    reputation_complaint_rate_warn: float = 0.001
+    reputation_complaint_rate_critical: float = 0.003
+    reputation_cold_pool_net_negative_runs: int = 3
+    gpt_api_credentials_json: str | None = None
+
+    # Scanner / MPP classification
+    scanner_confirm_window_s: int = 30
+    apple_proxy_ip_ranges: str | list[str] = ["17.0.0.0/8", "17.58.0.0/16"]
+    known_scanner_uas: str | list[str] = ["SafeLinks", "Proofpoint", "Barracuda", "DLP-"]
+    attribution_window_days: int = 30
 
 
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+_DEFAULT_ENGAGEMENT_CONFIG_PATH = (
+    Path(__file__).parent.parent.parent / "config" / "engagement.yaml"
+)
+
+
+class EngagementThresholds(BaseModel):
+    active_min_clicks_long: int
+    active_min_converts_long: int
+    engaged_min_opens_short: int
+    passive_min_opens_long: int
+    dormant_min_sends_long: int
+    cold_min_sends_lifetime: int
+    cold_min_tenure_days: int
+    new_max_sends_lifetime: int
+
+
+class EngagementScore(BaseModel):
+    weight_click: float
+    weight_open: float
+    weight_convert: float
+    halflife_click_days: float
+    halflife_open_days: float
+    halflife_convert_days: float
+    penalty_complaint: float
+    penalty_bounce: float
+
+
+class EngagementGuardrail(BaseModel):
+    max_tier_shift_pct: float = 0.10
+
+
+class EngagementColdExclusion(BaseModel):
+    enabled: bool = True
+
+
+class EngagementOverridesByProvider(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+
+class EngagementOverrides(BaseModel):
+    by_mailbox_provider: EngagementOverridesByProvider = EngagementOverridesByProvider()
+
+
+class EngagementConfig(BaseModel):
+    window_short_days: int
+    window_long_days: int
+    thresholds: EngagementThresholds
+    score: EngagementScore
+    guardrail: EngagementGuardrail = EngagementGuardrail()
+    cold_exclusion: EngagementColdExclusion = EngagementColdExclusion()
+    overrides: EngagementOverrides = EngagementOverrides()
+    tier_config_version: str = ""
+
+
+def load_engagement_config(path: str | Path | None = None) -> EngagementConfig:
+    resolved = Path(path) if path is not None else _DEFAULT_ENGAGEMENT_CONFIG_PATH
+    raw_bytes = resolved.read_bytes()
+    data = yaml.safe_load(raw_bytes)
+    engagement_block = data["engagement"]
+    version_hash = hashlib.sha256(
+        json.dumps(engagement_block, sort_keys=True).encode()
+    ).hexdigest()
+    config = EngagementConfig(**engagement_block)
+    config = config.model_copy(update={"tier_config_version": version_hash})
+    return config
+
+
+@lru_cache(maxsize=1)
+def get_engagement_config() -> EngagementConfig:
+    return load_engagement_config()

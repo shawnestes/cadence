@@ -14,3 +14,11 @@ htmlcov/
 .ruff_cache/
 .idea/
 .git.empty-stub-bak/
+
+# Claude Code local state
+.claude/worktrees/
+.claude/settings.local.json
+
+# Bulk record loader output — contains PII and verbatim TCPA consent text
+import-logs/
+*-rejects.csv

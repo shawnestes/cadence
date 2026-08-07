@@ -9,6 +9,7 @@ from sqlalchemy import select
 from app.models.campaign import Campaign
 from app.models.send import Send
 from tests._identity_helpers import create_identity, get_or_create_default_identity
+from tests.api._contact_profile_seed import seed_contact_profile
 
 
 def _campaign_body(**overrides) -> dict:
@@ -253,6 +254,7 @@ async def test_send_by_segment_enqueues_only_matching_recipients(
     )
     assert r_match.status_code == 201
     matching_id = r_match.json()["id"]
+    await seed_contact_profile(matching_id, email_domain="tx.cadencetests.io")
 
     non_matching_email = f"test-{uuid.uuid4()}@cadencetests.io"
     r_nomatch = await client.post(
@@ -261,10 +263,11 @@ async def test_send_by_segment_enqueues_only_matching_recipients(
         headers=auth_headers,
     )
     assert r_nomatch.status_code == 201
+    await seed_contact_profile(r_nomatch.json()["id"], email_domain="ca.cadencetests.io")
 
     resp = await client.post(
         f"/api/campaigns/{cid}/send",
-        json={"segment": {"attributes.state": "TX"}, "tenant": "otto"},
+        json={"segment": {"email_domain": "tx.cadencetests.io"}, "tenant": "otto"},
         headers=auth_headers,
     )
     assert resp.status_code == 200, resp.text

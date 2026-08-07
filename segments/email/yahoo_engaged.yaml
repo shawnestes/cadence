@@ -1,0 +1,16 @@
+segments:
+  - key: yahoo_opened_30d
+    name: "Yahoo (brand) — opened in last 30 days"
+    channel: email
+    predicate:
+      all:
+        - {field: mailbox_provider, op: eq,     value: yahoo}
+        - {field: last_open_at,     op: within, value: 30d}
+
+  - key: yahoo_reputation_opened_30d
+    name: "Yahoo reputation group (incl. AT&T-family, verizon.net) — opened 30d"
+    channel: email
+    predicate:
+      all:
+        - {field: reputation_group, op: eq,     value: yahoo}
+        - {field: last_open_at,     op: within, value: 30d}

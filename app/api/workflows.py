@@ -2,14 +2,14 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api._enrollment import EnrollmentOutcome, enroll_recipient
+from app.core.config import get_engagement_config
 from app.core.db import get_db
 from app.domain.segment import normalize
 from app.domain.workflow_defs import WorkflowDefinition
-from app.models.recipient import Recipient
 from app.models.suppression import Suppression
 from app.models.workflow import Workflow
 from app.models.workflow_version import WorkflowVersion
@@ -231,25 +231,34 @@ async def backfill_workflow(
             detail="workflow has no entry node defined; cannot backfill",
         )
 
+    now = datetime.now(timezone.utc)
     try:
         normalize(payload.segment)
-    except ValueError as exc:
+        where_sql, params = compile_segment(
+            payload.segment, get_engagement_config(), now=now
+        )
+    except (ValueError, KeyError) as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
         ) from exc
 
-    now = datetime.now(timezone.utc)
-    predicate = compile_segment(payload.segment, now=now)
+    params["tenant"] = tenant
+    params["limit"] = payload.limit
 
+    # The predicate targets contact_profile (cp); join back to recipients to
+    # resolve the id/email the rest of this handler operates on.
     candidates = (
         await db.execute(
-            select(Recipient)
-            .where(Recipient.tenant == tenant)
-            .where(predicate)
-            .order_by(Recipient.id)
-            .limit(payload.limit)
+            text(
+                "SELECT r.id AS id, r.email AS email "
+                "FROM contact_profile cp "
+                "JOIN recipients r ON r.id = cp.contact_id AND r.tenant = cp.tenant "
+                f"WHERE cp.tenant = :tenant AND {where_sql} "
+                "ORDER BY r.id LIMIT :limit"
+            ),
+            params,
         )
-    ).scalars().all()
+    ).all()
 
     suppressed_emails: set[str] = set()
     if candidates:

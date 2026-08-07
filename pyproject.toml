@@ -21,6 +21,8 @@ dependencies = [
     "itsdangerous>=2.2",
     "cryptography>=43",
     "anthropic>=0.40",
+    "aiodns>=3.2",
+    "pyyaml>=6.0.3",
 ]
 
 [dependency-groups]

@@ -3,10 +3,11 @@ from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.esp.factory import get_esp_adapter
+from app.core.config import get_engagement_config
 from app.core.db import get_db
 from app.domain.segment import normalize
 from app.domain.variant_picker import pick_variant
@@ -208,25 +209,38 @@ async def send_campaign(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
             ) from exc
 
-        predicate = compile_segment(payload.segment)
-        segment_count = (
-            await db.execute(
-                select(func.count())
-                .select_from(Recipient)
-                .where(Recipient.tenant == payload.tenant)
-                .where(predicate)
-            )
-        ).scalar_one()
+        try:
+            where_sql, params = compile_segment(payload.segment, get_engagement_config())
+        except (ValueError, KeyError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+        params["tenant"] = payload.tenant
+
+        # The predicate targets contact_profile (cp); join back to recipients
+        # to resolve the ids the rest of this handler operates on.
+        count_sql = text(
+            "SELECT count(*) FROM contact_profile cp "
+            "JOIN recipients r ON r.id = cp.contact_id AND r.tenant = cp.tenant "
+            f"WHERE cp.tenant = :tenant AND {where_sql}"
+        )
+        segment_count = (await db.execute(count_sql, params)).scalar_one()
         if segment_count > MAX_INPUTS:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"segment matches {segment_count} recipients, exceeds {MAX_INPUTS}",
             )
+        id_sql = text(
+            "SELECT r.id AS id FROM contact_profile cp "
+            "JOIN recipients r ON r.id = cp.contact_id AND r.tenant = cp.tenant "
+            f"WHERE cp.tenant = :tenant AND {where_sql}"
+        )
+        matched_ids = [row.id for row in (await db.execute(id_sql, params)).all()]
         rows = (
             await db.execute(
                 select(Recipient)
                 .where(Recipient.tenant == payload.tenant)
-                .where(predicate)
+                .where(Recipient.id.in_(matched_ids))
             )
         ).scalars().all()
         recipients = list(rows)

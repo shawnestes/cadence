@@ -4,13 +4,16 @@ from pydantic import BaseModel, Field
 class SegmentPreviewRequest(BaseModel):
     segment: dict | None = None
     tenant: str = "otto"
+    acknowledges_cold: bool = False
+    include_unsendable: bool = False
 
 
 class SegmentPreviewRecipient(BaseModel):
-    id: str
-    email: str
-    vertical: str
-    engagement_tier: str
+    contact_id: str
+    email_domain: str | None
+    mailbox_provider: int | None
+    engagement_tier: int | None
+    engagement_score: int | None
 
 
 class SegmentPreviewResponse(BaseModel):

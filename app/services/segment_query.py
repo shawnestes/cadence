@@ -1,127 +1,394 @@
-"""SQL compiler for the segment DSL (SPEC_ADDENDUM_002.md §3.1).
+"""SQL compiler for the segment DSL targeting contact_profile (SPEC-segmentation.md §7).
 
-Placement rationale: CLAUDE.md forbids SQLAlchemy imports inside
-``app/domain/`` (domain logic must stay pure/DB-free for unit testing). This
-compiler needs SQLAlchemy, so it can't live there. It also isn't a natural
-fit inside ``app/api/segments.py`` as a "shared helper" — both
-``app/api/workflows.py`` (backfill) and ``app/api/campaigns.py``
-(segment-based send) need it too, and having them import from a sibling
-``app/api`` module would create api-module-to-api-module coupling. A
-dedicated ``app/services/`` module (sibling to ``domain``, ``adapters``,
-``api``) is the natural shared home: it can depend on both the domain DSL
-normalizer and SQLAlchemy, and every API module that needs segment-to-SQL
-compilation imports it the same way.
+Placement rationale: CLAUDE.md forbids SQLAlchemy imports inside ``app/domain/``
+(domain logic must stay pure/DB-free for unit testing). This compiler needs to
+produce parameterized SQL, so it can't live there. A dedicated ``app/services/``
+module (sibling to ``domain``, ``adapters``, ``api``) is the natural shared home.
 
-``compile_segment`` takes a segment dict (raw v1/v2 — it normalizes
-internally via ``app.domain.segment.normalize`` so callers don't have to)
-and returns a SQLAlchemy boolean expression suitable for
-``select(Recipient).where(compile_segment(...))``. Tenant scoping is
-intentionally NOT included in the returned expression — see the module-level
-note below — callers add ``Recipient.tenant == tenant`` themselves so the
-compiled expression stays a pure function of the segment alone and every
-call site is unambiguous about the tenant filter being present.
+``compile_segment`` takes a segment dict (raw v1/v2/v3 — it normalizes internally
+via ``app.domain.segment.normalize``) and returns a ``(where_sql, params)`` tuple
+suitable for use with ``sqlalchemy.text()``.  Tenant scoping is intentionally NOT
+included — callers add ``cp.tenant = :tenant`` themselves.
 """
 from __future__ import annotations
 
+import re
+import structlog
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import ColumnElement, and_, not_, or_, select
-from sqlalchemy.sql.selectable import Exists
-
-from app.domain.duration import parse_iso8601_duration
-from app.domain.segment import normalize
-from app.models.event import Event
-from app.models.recipient import Recipient
+from app.core.config import EngagementConfig
+from app.domain.isp import MAILBOX_PROVIDER_CODES as _ISP_MAILBOX_PROVIDER_CODES
+from app.domain.isp import REPUTATION_GROUP_CODES as _ISP_REPUTATION_GROUP_CODES
+from app.domain.segment import _parse_day_duration, normalize
 
 __all__ = ["compile_segment"]
 
-_ENGAGEMENT_EVENT_TYPES = ("open", "click")
+log = structlog.get_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# Smallint code mappings
+# ---------------------------------------------------------------------------
+
+# Engagement tier codes (matches TIER_* constants in app/domain/engagement_v2.py).
+ENGAGEMENT_TIER_CODES: dict[str, int] = {
+    "active": 1,
+    "engaged": 2,
+    "passive": 3,
+    "dormant": 4,
+    "cold": 5,
+    "new": 6,
+    "unknown": 7,
+}
+
+# Provider codes are owned by app/domain/isp.py, which mirrors the
+# domain_provider seed in seg1_domain_provider. Importing rather than
+# re-declaring keeps the compiler and the ingest path from drifting.
+
+# "outlook" is kept as a YAML-facing alias for microsoft; older segment files
+# use it. There is no "unknown" provider — unclassified domains are "other" (0).
+MAILBOX_PROVIDER_CODES: dict[str, int] = {
+    **_ISP_MAILBOX_PROVIDER_CODES,
+    "outlook": _ISP_MAILBOX_PROVIDER_CODES["microsoft"],
+}
+
+REPUTATION_GROUP_CODES: dict[str, int] = {
+    **_ISP_REPUTATION_GROUP_CODES,
+    "outlook": _ISP_REPUTATION_GROUP_CODES["microsoft"],
+}
+
+# Fields that carry smallint codes and their code lookup table.
+_SMALLINT_FIELDS: dict[str, dict[str, int]] = {
+    "mailbox_provider": MAILBOX_PROVIDER_CODES,
+    "reputation_group": REPUTATION_GROUP_CODES,
+    "engagement_tier": ENGAGEMENT_TIER_CODES,
+}
+
+# All contact_profile columns exposed to the segment DSL.
+_CP_FIELDS: frozenset[str] = frozenset(
+    {
+        "email_domain",
+        "mailbox_provider",
+        "reputation_group",
+        "engagement_tier",
+        "country",
+        "tz",
+        "first_send_at",
+        "last_send_at",
+        "last_open_at",
+        "last_click_at",
+        "last_convert_at",
+        "sends_30d",
+        "opens_30d",
+        "clicks_30d",
+        "sends_90d",
+        "opens_90d",
+        "clicks_90d",
+        "converts_90d",
+        "bounces_90d",
+        "complaints_90d",
+        "sends_lifetime",
+        "opens_lifetime",
+        "clicks_lifetime",
+        "engagement_score",
+        "sendable",
+    }
+)
+
+
+# ---------------------------------------------------------------------------
+# Param bag
+# ---------------------------------------------------------------------------
+
+
+class _ParamBag:
+    """Hands out unique parameter names and accumulates bind values."""
+
+    def __init__(self) -> None:
+        self._counter: int = 0
+        self.params: dict[str, Any] = {}
+
+    def add(self, value: Any) -> str:
+        name = f"p{self._counter}"
+        self._counter += 1
+        self.params[name] = value
+        return name
+
+
+# ---------------------------------------------------------------------------
+# Field → column resolution
+# ---------------------------------------------------------------------------
+
+
+_ATTR_PREFIX = "attributes."
+_ATTR_KEY_RE = re.compile(r"^[a-z0-9_]{1,64}$")
+
+# Operators that compare numerically and therefore need a cast off jsonb text.
+_NUMERIC_OPS = frozenset({"gt", "gte", "lt", "lte", "between"})
+
+
+def _col(field: str) -> str:
+    """Return the qualified ``cp.<column>`` expression for a DSL field name."""
+    if field not in _CP_FIELDS:
+        raise ValueError(f"unsupported segment field: {field!r}")
+    return f"cp.{field}"
+
+
+def _attr_subquery(key: str, bag: "_ParamBag", *, as_json: bool) -> str:
+    """Correlated scalar subquery for a recipients.attributes key.
+
+    Returns the raw jsonb value when ``as_json`` (needed by jsonb_exists and
+    NULL checks), otherwise the text projection.  The key is bound as a
+    parameter, never interpolated.
+    """
+    if not _ATTR_KEY_RE.match(key):
+        raise ValueError(f"invalid attributes key: {key!r}")
+    p = bag.add(key)
+    op = "->" if as_json else "->>"
+    return (
+        f"(SELECT r.attributes {op} :{p} FROM recipients r"
+        f" WHERE r.id = cp.contact_id AND r.tenant = cp.tenant)"
+    )
+
+
+def _coerce_value(field: str, value: Any) -> Any:
+    """Translate string values to smallint codes for coded fields."""
+    if field.startswith(_ATTR_PREFIX):
+        return value
+    codes = _SMALLINT_FIELDS.get(field)
+    if codes is None:
+        return value
+    if isinstance(value, list):
+        return [codes[v] if isinstance(v, str) else v for v in value]
+    if isinstance(value, str):
+        return codes[value]
+    return value
+
+
+# ---------------------------------------------------------------------------
+# Clause compiler
+# ---------------------------------------------------------------------------
+
+
+def _compile_clause(node: dict, bag: _ParamBag, now: datetime) -> str:
+    """Recursively compile a normalized clause node to a SQL fragment."""
+    if "all" in node:
+        parts = [_compile_clause(c, bag, now) for c in node["all"]]
+        if not parts:
+            return "true"
+        if len(parts) == 1:
+            return parts[0]
+        return "(" + " AND ".join(parts) + ")"
+
+    if "any" in node:
+        parts = [_compile_clause(c, bag, now) for c in node["any"]]
+        if not parts:
+            return "false"
+        if len(parts) == 1:
+            return parts[0]
+        return "(" + " OR ".join(parts) + ")"
+
+    if "none" in node:
+        parts = [_compile_clause(c, bag, now) for c in node["none"]]
+        if not parts:
+            return "true"
+        inner = " OR ".join(parts) if len(parts) == 1 else "(" + " OR ".join(parts) + ")"
+        return f"NOT ({inner})"
+
+    # Field clause.
+    field: str = node["field"]
+    is_attr = field.startswith(_ATTR_PREFIX)
+    if is_attr:
+        attr_key = field[len(_ATTR_PREFIX):]
+        # Validate eagerly so a bad key fails even for operators that build
+        # their own expression below.
+        if not _ATTR_KEY_RE.match(attr_key):
+            raise ValueError(f"invalid attributes key: {attr_key!r}")
+        op_name = next((k for k in node if k != "field"), "")
+        if op_name in _NUMERIC_OPS:
+            col = f"({_attr_subquery(attr_key, bag, as_json=False)})::numeric"
+        elif op_name in ("is_null", "is_not_null", "contains"):
+            col = _attr_subquery(attr_key, bag, as_json=True)
+        else:
+            col = _attr_subquery(attr_key, bag, as_json=False)
+    else:
+        col = _col(field)
+
+    # --- Equality / set operators ---
+    if "eq" in node:
+        val = _coerce_value(field, node["eq"])
+        p = bag.add(val)
+        return f"{col} = :{p}"
+
+    if "ne" in node:
+        val = _coerce_value(field, node["ne"])
+        p = bag.add(val)
+        return f"{col} != :{p}"
+
+    if "in" in node:
+        val = _coerce_value(field, node["in"])
+        p = bag.add(val)
+        return f"{col} = ANY(:{p})"
+
+    if "not_in" in node:
+        val = _coerce_value(field, node["not_in"])
+        p = bag.add(val)
+        return f"{col} != ALL(:{p})"
+
+    if "contains" in node:
+        p = bag.add(node["contains"])
+        # Function form, not the `?` operator: `?` collides with the driver's
+        # placeholder syntax.
+        return f"jsonb_exists({col}, :{p})"
+
+    # --- Null-check operators ---
+    if "is_null" in node:
+        if is_attr:
+            # Key-absent (SQL NULL) and key-present-with-explicit-JSON-null
+            # ('null'::jsonb) must both count as "is_null" — the record
+            # mapper writes explicit JSON nulls for unset optional fields
+            # (attributes is replaced wholesale on upsert), so that is the
+            # common case in production data, not an edge case.
+            return f"({col} IS NULL OR {col} = 'null'::jsonb)"
+        return f"{col} IS NULL"
+
+    if "is_not_null" in node:
+        if is_attr:
+            return f"({col} IS NOT NULL AND {col} <> 'null'::jsonb)"
+        return f"{col} IS NOT NULL"
+
+    # --- Numeric / datetime comparison operators ---
+    if "gt" in node:
+        val = _coerce_value(field, node["gt"])
+        p = bag.add(val)
+        return f"{col} > :{p}"
+
+    if "gte" in node:
+        val = _coerce_value(field, node["gte"])
+        p = bag.add(val)
+        return f"{col} >= :{p}"
+
+    if "lt" in node:
+        val = _coerce_value(field, node["lt"])
+        p = bag.add(val)
+        return f"{col} < :{p}"
+
+    if "lte" in node:
+        val = _coerce_value(field, node["lte"])
+        p = bag.add(val)
+        return f"{col} <= :{p}"
+
+    # --- Range operator ---
+    if "between" in node:
+        lo, hi = node["between"]
+        lo_val = _coerce_value(field, lo)
+        hi_val = _coerce_value(field, hi)
+        p_lo = bag.add(lo_val)
+        p_hi = bag.add(hi_val)
+        return f"{col} BETWEEN :{p_lo} AND :{p_hi}"
+
+    # --- Timestamp window operators ---
+    if "within" in node:
+        delta = _parse_day_duration(node["within"])
+        cutoff = now - delta
+        p = bag.add(cutoff)
+        return f"{col} >= :{p}"
+
+    if "not_within" in node:
+        delta = _parse_day_duration(node["not_within"])
+        cutoff = now - delta
+        p = bag.add(cutoff)
+        return f"({col} IS NULL OR {col} < :{p})"
+
+    # --- Legacy before/after (ISO-8601 duration from now) ---
+    if "before" in node:
+        delta = _parse_day_duration(node["before"])
+        cutoff = now - delta
+        p = bag.add(cutoff)
+        return f"{col} < :{p}"
+
+    if "after" in node:
+        delta = _parse_day_duration(node["after"])
+        cutoff = now - delta
+        p = bag.add(cutoff)
+        return f"{col} > :{p}"
+
+    raise ValueError(
+        f"segment clause for field {field!r} has no recognized operator in node {node!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 
 def compile_segment(
-    segment: dict | None,
+    predicate_json: dict | None,
+    config: EngagementConfig,
     *,
     now: datetime | None = None,
-) -> ColumnElement[bool]:
-    """Compile a segment DSL dict into a SQLAlchemy boolean expression.
+    acknowledges_cold: bool = False,
+    include_unsendable: bool = False,
+) -> tuple[str, dict]:
+    """Compile a segment DSL dict into a parameterized SQL WHERE clause.
 
     Args:
-        segment: A raw v1-flat or v2 segment dict (or ``None``, matching
-            everything). Normalized internally via
+        predicate_json: A raw v1-flat, v2, or v3 segment dict (or ``None``,
+            matching everything). Normalized internally via
             ``app.domain.segment.normalize``.
-        now: Reference time for relative-duration (``before``/``after``,
-            ``no_engagement_since``) clauses; defaults to the current UTC
-            time. Exposed for deterministic testing.
+        config: The loaded ``EngagementConfig`` (used for cold-exclusion guard).
+        now: Reference time for relative-duration clauses; defaults to the
+            current UTC time. Exposed for deterministic testing.
+        acknowledges_cold: When ``True`` and ``config.cold_exclusion.enabled``
+            is ``True``, the cold-tier exclusion guard is omitted.  Default
+            ``False`` means the guard is always appended.
+        include_unsendable: When ``True``, the ``cp.sendable = true`` guard is
+            omitted so the caller can target unsendable contacts explicitly.
 
     Returns:
-        A SQLAlchemy boolean expression against ``Recipient`` columns,
-        suitable for ``select(Recipient).where(compile_segment(segment))``.
-        Does NOT include tenant scoping — callers must add
-        ``Recipient.tenant == tenant`` themselves.
+        A ``(where_sql, params)`` tuple.  ``where_sql`` is a parameterized SQL
+        fragment (using ``:param_name`` style) suitable for
+        ``WHERE {where_sql}``.  ``params`` is a dict of bind values for use
+        with ``sqlalchemy.text()``.  Tenant scoping is NOT included — callers
+        must add ``cp.tenant = :tenant`` themselves.
 
     Raises:
-        ValueError: If ``segment`` is structurally invalid (propagated from
-            ``normalize()``).
+        ValueError: If ``predicate_json`` is structurally invalid (propagated
+            from ``normalize()``) or references an unsupported field.
     """
     resolved_now = now if now is not None else datetime.now(timezone.utc)
-    normalized = normalize(segment)
-    return _compile_node(normalized, resolved_now)
+    normalized = normalize(predicate_json)
 
+    bag = _ParamBag()
+    predicate_sql = _compile_clause(normalized, bag, resolved_now)
 
-def _compile_node(node: dict, now: datetime) -> ColumnElement[bool]:
-    if "all" in node:
-        clauses = [_compile_node(c, now) for c in node["all"]]
-        return and_(*clauses) if clauses else True
-    if "any" in node:
-        clauses = [_compile_node(c, now) for c in node["any"]]
-        return or_(*clauses) if clauses else False
-    if node.get("kind") == "no_engagement_since":
-        return _compile_no_engagement_since(node, now)
-    return _compile_field_clause(node, now)
+    guards: list[str] = []
 
+    if not include_unsendable:
+        guards.append("cp.sendable = true")
 
-def _compile_no_engagement_since(node: dict, now: datetime) -> Exists:
-    window = parse_iso8601_duration(node["window"])
-    since = now - window
-    engagement_exists = (
-        select(Event.id)
-        .where(Event.recipient_id == Recipient.id)
-        .where(Event.event_type.in_(_ENGAGEMENT_EVENT_TYPES))
-        .where(Event.occurred_at >= since)
-        .exists()
+    if not acknowledges_cold and config.cold_exclusion.enabled:
+        cold_code = ENGAGEMENT_TIER_CODES["cold"]
+        cold_p = bag.add(cold_code)
+        guards.append(f"cp.engagement_tier != :{cold_p}")
+
+    all_parts: list[str] = []
+    if predicate_sql != "true":
+        all_parts.append(predicate_sql)
+    all_parts.extend(guards)
+
+    if not all_parts:
+        where_sql = "true"
+    elif len(all_parts) == 1:
+        where_sql = all_parts[0]
+    else:
+        where_sql = " AND ".join(all_parts)
+
+    log.debug(
+        "segment_query.effective_predicate",
+        where_sql=where_sql,
+        acknowledges_cold=acknowledges_cold,
     )
-    return not_(engagement_exists)
 
-
-def _column_for_field(field: str) -> ColumnElement[Any]:
-    if field == "vertical":
-        return Recipient.vertical
-    if field == "engagement_tier":
-        return Recipient.engagement_tier
-    if field == "last_seen_at":
-        return Recipient.last_seen_at
-    if field.startswith("attributes."):
-        attr_key = field.split(".", 1)[1]
-        return Recipient.attributes[attr_key].astext
-    raise ValueError(f"unsupported segment field: {field!r}")
-
-
-def _compile_field_clause(node: dict, now: datetime) -> ColumnElement[bool]:
-    field = node["field"]
-    column = _column_for_field(field)
-
-    if "eq" in node:
-        return column == node["eq"]
-    if "in" in node:
-        return column.in_(node["in"])
-    if "not_in" in node:
-        return column.not_in(node["not_in"])
-    if "before" in node:
-        window = parse_iso8601_duration(node["before"])
-        return column < (now - window)
-    if "after" in node:
-        window = parse_iso8601_duration(node["after"])
-        return column > (now - window)
-
-    raise ValueError(f"segment clause for field {field!r} has no recognized operator")
+    return where_sql, bag.params

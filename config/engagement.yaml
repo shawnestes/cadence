@@ -1,0 +1,34 @@
+engagement:
+  window_short_days: 30
+  window_long_days:  90
+
+  thresholds:
+    active_min_clicks_long:    1
+    active_min_converts_long:  1
+    engaged_min_opens_short:   1
+    passive_min_opens_long:    1
+    dormant_min_sends_long:    3
+    cold_min_sends_lifetime:   5
+    cold_min_tenure_days:      30
+    new_max_sends_lifetime:    3
+
+  score:
+    weight_click:          0.50
+    weight_open:           0.30
+    weight_convert:        0.20
+    halflife_click_days:   30
+    halflife_open_days:    21
+    halflife_convert_days: 90
+    penalty_complaint:     0.0
+    penalty_bounce:        0.5
+
+  guardrail:
+    max_tier_shift_pct:    0.10
+
+  cold_exclusion:
+    enabled: true
+
+  overrides:
+    by_mailbox_provider:
+      cable:
+        cold_min_sends_lifetime: 8

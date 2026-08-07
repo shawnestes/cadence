@@ -12,8 +12,11 @@ from app.workers import (
     engagement_scorer,
     otto_sync,
     partition_maintenance,
+    profile_refresh,
+    reputation_checks,
     reputation_monitor,
     send_worker,
+    sqs_event_poller,
     stats_rollup,
     variant_retirement,
     workflow_tick,
@@ -37,6 +40,14 @@ async def main() -> None:
         "interval",
         seconds=1,
         id="send_worker",
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        sqs_event_poller.run_once,
+        "interval",
+        seconds=5,
+        id="sqs_event_poller",
         max_instances=1,
         coalesce=True,
     )
@@ -73,6 +84,14 @@ async def main() -> None:
         coalesce=True,
     )
     scheduler.add_job(
+        reputation_checks.run_once,
+        "interval",
+        seconds=get_settings().alert_monitor_interval_seconds,
+        id="reputation_checks",
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
         partition_maintenance.run_once,
         "interval",
         hours=24,
@@ -80,11 +99,29 @@ async def main() -> None:
         max_instances=1,
         coalesce=True,
     )
+    # Retired in M-SEG-7 — no-op stub; slot retained to avoid config drift.
     scheduler.add_job(
         engagement_scorer.run_once,
         "cron",
         hour=3,
         id="engagement_scorer",
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        profile_refresh.run_incremental,
+        'interval',
+        seconds=120,
+        id='profile_refresh_incremental',
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        profile_refresh.run_nightly,
+        'cron',
+        hour=3,
+        minute=30,
+        id='profile_refresh_nightly',
         max_instances=1,
         coalesce=True,
     )

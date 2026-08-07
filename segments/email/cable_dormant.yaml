@@ -1,0 +1,11 @@
+segments:
+  - key: cable_dormant_reengage
+    name: "Cable — dormant, eligible for re-engagement"
+    channel: email
+    predicate:
+      all:
+        - {field: mailbox_provider, op: eq,  value: cable}
+        - {field: engagement_tier,  op: eq,  value: dormant}
+        - {field: sends_30d,        op: lte, value: 2}
+        - none:
+            - {field: complaints_90d, op: gte, value: 1}

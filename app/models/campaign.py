@@ -21,6 +21,7 @@ class Campaign(Base, TimestampMixin):
         UUID(as_uuid=True), ForeignKey("sending_identities.id"), nullable=True
     )
     cohort_filter: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    segment_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     ai_brief: Mapped[str | None] = mapped_column(Text, nullable=True)
     mab_config: Mapped[dict] = mapped_column(
         JSONB,

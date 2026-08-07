@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 import structlog
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import literal_column, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,6 +12,9 @@ from app.domain.segment import matches as segment_matches
 from app.models.recipient import Recipient
 from app.models.workflow import Workflow
 from app.schemas.recipient import RecipientIngestIn, RecipientIngestOut
+from app.schemas.records import RecordBatchIn, RecordBatchOut, RecordResult
+from app.services.record_ingest import IngestCounters, flush_unknown_domains, ingest_one_row
+from app.services.tenant_mapping import load_tenant_mapping
 
 router = APIRouter(tags=["ingest"])
 
@@ -125,3 +128,65 @@ async def ingest_recipient(
         status=row.status,
         created=bool(row.created),
     )
+
+
+@router.post("/ingest/records/batch", response_model=RecordBatchOut)
+async def ingest_records_batch(
+    payload: RecordBatchIn,
+    db: AsyncSession = Depends(get_db),
+) -> RecordBatchOut:
+    """Bulk record ingest. Same service the CLI uses (spec §11)."""
+    if payload.enroll:
+        raise HTTPException(400, "enroll is not supported on the batch endpoint yet")
+
+    mapping = load_tenant_mapping(payload.tenant)
+    now = datetime.now(timezone.utc)
+    counters = IngestCounters()
+    results: list[RecordResult] = []
+    unknown_domains: set[str] = set()
+
+    for index, raw in enumerate(payload.records):
+        counters.read += 1
+        try:
+            # A statement failure (e.g. a value the DB rejects) poisons the
+            # session for anything after it. A SAVEPOINT scopes that damage
+            # to this one row: on error, SQLAlchemy rolls back to it on
+            # __aexit__, leaving `db` usable for the rows that follow within
+            # the same transaction and the same final commit below.
+            async with db.begin_nested():
+                outcome, _ = await ingest_one_row(
+                    raw,
+                    db,
+                    tenant=payload.tenant,
+                    vertical=payload.vertical,
+                    mapping=mapping,
+                    now=now,
+                )
+        except Exception as exc:  # noqa: BLE001 - isolate one bad row from the rest of the batch
+            counters.rejected += 1
+            log.warning(
+                "ingest.batch_row_failed",
+                tenant=payload.tenant,
+                index=index,
+                error=str(exc),
+            )
+            results.append(RecordResult(index=index, status="error", errors=[str(exc)[:500]]))
+            continue
+
+        if outcome.unknown_domain:
+            unknown_domains.add(outcome.unknown_domain)
+        if outcome.status == "created":
+            counters.loaded += 1
+        elif outcome.status == "updated":
+            counters.updated += 1
+        elif outcome.status == "quarantined":
+            counters.quarantined += 1
+        else:
+            counters.rejected += 1
+        results.append(
+            RecordResult(index=index, status=outcome.status, errors=list(outcome.errors))
+        )
+
+    await db.commit()
+    await flush_unknown_domains(payload.tenant, unknown_domains)
+    return RecordBatchOut(results=results, counters=counters.as_dict())
