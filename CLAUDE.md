@@ -68,6 +68,7 @@ uv run pytest
 
 ```bash
 # Bulk-load tenant records (rejects file holds PII — it is gitignored)
+# CSV format + HTTP endpoint reference: docs/record-ingestion.md
 uv run python -m app.cli.load_records --tenant otto --file leads.csv --vertical auto
 uv run python -m app.cli.load_records --tenant otto --file leads.csv --vertical auto --dry-run
 ```
