@@ -27,24 +27,27 @@ from app.core.db import async_session_factory
 _TENANT = "otto"
 
 _HEADERS = [
-    "email", "user_id", "first_name", "last_name", "address", "city", "state",
-    "zip", "phone", "vehicle_1_year", "vehicle_1_make", "vehicle_1_model",
-    "tcpa_text", "tcpa_consent_at", "consent_url", "lead_id", "consent_ip",
-    "consent_ua",
+    "email", "user_id", "first_name", "last_name", "city", "state",
+    "zip", "phone", "year", "make", "model",
+    "current_company", "jornaya_id", "trusted_form_cert",
+    "tcpa_text", "tcpa_date", "consent_url", "lead_id", "ip",
+    "user_agent",
 ]
 
 
 def _row(email: str, **overrides) -> dict[str, str]:
     row = {
         "email": email, "user_id": "otto-1", "first_name": "Shawn",
-        "last_name": "Estes", "address": "100 Congress Ave", "city": "Austin",
+        "last_name": "Estes", "city": "Austin",
         "state": "TX", "zip": "78701", "phone": "5125551234",
-        "vehicle_1_year": "2019", "vehicle_1_make": "Toyota",
-        "vehicle_1_model": "Camry",
+        "year": "2019", "make": "Toyota", "model": "Camry",
+        "current_company": "Allstate",
+        "jornaya_id": "2EAB0F47-BA9A-3840-4593-8EC5D6E057BB",
+        "trusted_form_cert": "https://cert.trustedform.com/abc123",
         "tcpa_text": "By submitting you agree to receive emails.",
-        "tcpa_consent_at": "2026-01-15T10:30:00Z",
+        "tcpa_date": "2026-01-15T10:30:00Z",
         "consent_url": "https://otto.example/quote", "lead_id": "form-7",
-        "consent_ip": "203.0.113.9", "consent_ua": "Mozilla/5.0",
+        "ip": "203.0.113.9", "user_agent": "Mozilla/5.0",
     }
     row.update(overrides)
     return row
@@ -415,7 +418,7 @@ async def test_batch_failure_does_not_double_count_rows_retried_after_rollback(
         path,
         [
             _row(good),
-            _row(quarantined, tcpa_text="", tcpa_consent_at=""),
+            _row(quarantined, tcpa_text="", tcpa_date=""),
             _row(bad),
         ],
     )

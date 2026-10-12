@@ -24,7 +24,7 @@ Each record ends in exactly one of four states.
 Non-negotiables baked into the pipeline:
 
 - **No consent, no contact.** Missing `tcpa_text` or an unparseable
-  `tcpa_consent_at` quarantines the record. No recipient row is created.
+  `tcpa_date` quarantines the record. No recipient row is created.
 - **A re-import never resurrects an unsubscriber.** `consent_state` only
   ratchets toward opted-out and `suppressed_at` is never cleared.
 - **`consent_at` moves forward only.** Replaying a stale export cannot regress
@@ -45,13 +45,13 @@ Column order does not matter. Extra columns are ignored.
 ### Full header row
 
 ```csv
-email,user_id,first_name,last_name,address,city,state,zip,phone,vehicle_1_year,vehicle_1_make,vehicle_1_model,vehicle_1_vin,tcpa_text,tcpa_consent_at,consent_url,lead_id,consent_ip,consent_ua
+email,vertical,user_id,first_name,last_name,city,state,zip,phone,year,make,model,vin,current_company,jornaya_id,trusted_form_cert,tcpa_text,tcpa_date,consent_url,lead_id,ip,user_agent
 ```
 
 ### Example row
 
 ```csv
-shawn@example.com,otto-99182,SHAWN,ESTES,100 Congress Ave,Austin,texas,7870,5125551234,2019,Toyota,Camry,4T1BF1FK5CU511111,"By submitting you agree to receive emails.",2026-01-15T10:30:00Z,https://otto.example/quote,form-7,203.0.113.9,Mozilla/5.0
+shawn@example.com,auto,otto-99182,SHAWN,ESTES,Austin,texas,7870,5125551234,2019,Toyota,Camry,4T1BF1FK5CU511111,Allstate,2EAB0F47-BA9A-3840-4593-8EC5D6E057BB,https://cert.trustedform.com/abc123,"By submitting you agree to receive emails.",2026-01-15T10:30:00Z,https://otto.example/quote,form-7,203.0.113.9,Mozilla/5.0
 ```
 
 That row loads as `first_name=Shawn`, `state=TX`, `zip=07870`, `phone=+15125551234`.
@@ -61,23 +61,32 @@ That row loads as `first_name=Shawn`, `state=TX`, `zip=07870`, `phone=+151255512
 | Column | Required | Normalized to | Bad value means |
 |---|---|---|---|
 | `email` | **yes** | lowercased, trimmed | record **rejected** |
+| `vertical` | no | trimmed; falls back to `--vertical` | uses `--vertical` |
 | `user_id` | no | trimmed | stored as-is |
 | `first_name`, `last_name` | no | whitespace collapsed; ALL-CAPS or all-lower title-cased, mixed case left alone | `null` |
-| `address` | no | trimmed | `null` |
 | `city` | no | trimmed | `null` |
 | `state` | no | 2-letter USPS code (`texas` → `TX`) | `null` |
 | `zip` | no | 5 digits, leading zeros restored; ZIP+4 truncated | `null` |
 | `phone` | no | `+1XXXXXXXXXX` | `null` |
+| `current_company` | no | trimmed | `null` |
+| `jornaya_id` | no | trimmed | `null` |
+| `trusted_form_cert` | no | trimmed | `null` |
 | `tcpa_text` | **yes** | trimmed | record **quarantined** |
-| `tcpa_consent_at` | **yes** | ISO-8601; naive treated as UTC | record **quarantined** |
+| `tcpa_date` | **yes** | ISO-8601; naive treated as UTC | record **quarantined** |
 | `consent_url` | no | trimmed | `null` |
 | `lead_id` | no | trimmed | `null` |
-| `consent_ip` | no | canonical IPv4/IPv6 | `null` (never fails the record) |
-| `consent_ua` | no | trimmed | `null` |
+| `ip` | no | canonical IPv4/IPv6 | `null` (never fails the record) |
+| `user_agent` | no | trimmed | `null` |
 
-**Column name vs attribute name.** Segments read `attributes.<key>`, and one key
-differs from its column: the `address` column is stored as `attributes.address1`.
-Everything else keeps its column name (`user_id` included).
+**Column name vs attribute name.** Segments read `attributes.<key>`; every
+column above keeps its own name as the attribute key (`user_id` included).
+`attributes.address1` exists but is always `null` — OTTO's export carries no
+mailing address column.
+
+**Lead certification.** `jornaya_id` and `trusted_form_cert` are third-party
+evidence of the consent event. They are optional (an older export may omit
+them, and a missing cert must never reject a record), and they are written to
+both `attributes` and `consent_proof.raw.attributes` on every proof row.
 
 Notes on the fussy ones:
 
@@ -87,24 +96,29 @@ Notes on the fussy ones:
 - **`phone`** is US-only: 10 digits, or 11 leading with `1`. 7-digit local
   numbers, extensions, and international numbers are rejected to `null` rather
   than guessed at.
-- **`tcpa_consent_at`** accepts `2026-01-15T10:30:00Z`, `+00:00` offsets, and
+- **`tcpa_date`** accepts `2026-01-15T10:30:00Z`, `+00:00` offsets, and
   naive `2026-01-15 10:30:00` (treated as UTC). Anything `datetime.fromisoformat`
   won't parse quarantines the record.
-- **`consent_ip`** is corroborating evidence, not the legally meaningful part of
+- **`ip`** is corroborating evidence, not the legally meaningful part of
   the proof — a malformed IP is dropped to `null` and the record still loads.
   Zone-scoped IPv6 (`fe80::1%eth0`) is treated as invalid; Postgres `inet`
   rejects it.
 
-### Vehicles (repeating group)
+### Vehicle (repeating group, max 1)
 
-Indexed columns, `vehicle_{n}_{field}`, `n` from 1 to 5. Fields: `year`, `make`,
-`model`, `vin`. Include only the columns you have — an entirely empty index is
-skipped, not stored as a blank vehicle.
+Flat columns named for the field itself: `year`, `make`, `model`, `vin`.
+Include only the columns you have — an entirely empty set is skipped, not
+stored as a blank vehicle.
 
 ```csv
-vehicle_1_year,vehicle_1_make,vehicle_1_model,vehicle_2_year,vehicle_2_make,vehicle_2_model
-2019,Toyota,Camry,2021,Honda,Civic
+year,make,model
+2019,Toyota,Camry
 ```
+
+**One vehicle per record.** The mapping sets `max: 1` because flat column names
+carry no index — there is no way to express a second vehicle in CSV. Multiple
+vehicles require the JSONL `vehicles` array below, and even then only the first
+is kept while `max: 1` stands.
 
 `year` must be a whole calendar year between 1900 and 2100. `2019.7`, `inf`,
 and `1e400` are dropped, not truncated.
@@ -112,16 +126,16 @@ and `1e400` are dropped, not truncated.
 Three attributes are derived automatically and are queryable from segments:
 
 - `vehicle_count` — integer
-- `vehicle_makes` — lowercased, de-duplicated list (`["toyota","honda"]`)
+- `vehicle_makes` — lowercased, de-duplicated list (`["toyota"]`)
 - `newest_vehicle_year` — integer
 
 ### JSONL
 
 Same field names, one JSON object per line. Use `.jsonl` or `.ndjson`. Vehicles
-may be a real array under the `vehicles` key instead of indexed columns:
+may be a real array under the `vehicles` key instead of the flat columns:
 
 ```json
-{"email":"shawn@example.com","user_id":"otto-99182","first_name":"Shawn","state":"TX","zip":"78701","phone":"5125551234","vehicles":[{"year":2019,"make":"Toyota","model":"Camry"}],"tcpa_text":"By submitting you agree to receive emails.","tcpa_consent_at":"2026-01-15T10:30:00Z","consent_ip":"203.0.113.9"}
+{"email":"shawn@example.com","user_id":"otto-99182","first_name":"Shawn","state":"TX","zip":"78701","phone":"5125551234","vehicles":[{"year":2019,"make":"Toyota","model":"Camry"}],"jornaya_id":"2EAB0F47-BA9A-3840-4593-8EC5D6E057BB","trusted_form_cert":"https://cert.trustedform.com/abc123","tcpa_text":"By submitting you agree to receive emails.","tcpa_date":"2026-01-15T10:30:00Z","ip":"203.0.113.9"}
 ```
 
 A `vehicles` value that is a JSON-*encoded string* rather than a real array
@@ -208,25 +222,24 @@ record, and 200 keeps the request inside gateway timeouts. 201+ records is a 422
       "user_id": "otto-99182",
       "first_name": "Shawn",
       "last_name": "Estes",
-      "address": "100 Congress Ave",
       "city": "Austin",
       "state": "TX",
       "zip": "78701",
       "phone": "5125551234",
       "vehicles": [{"year": 2019, "make": "Toyota", "model": "Camry"}],
       "tcpa_text": "By submitting you agree to receive emails.",
-      "tcpa_consent_at": "2026-01-15T10:30:00Z",
+      "tcpa_date": "2026-01-15T10:30:00Z",
       "consent_url": "https://otto.example/quote",
       "lead_id": "form-7",
-      "consent_ip": "203.0.113.9",
-      "consent_ua": "Mozilla/5.0"
+      "ip": "203.0.113.9",
+      "user_agent": "Mozilla/5.0"
     }
   ]
 }
 ```
 
 Each object in `records` uses the **same field names as the CSV columns** —
-indexed `vehicle_1_year` style keys work too, but a real `vehicles` array is
+flat `year`/`make`/`model` keys work too, but a real `vehicles` array is
 cleaner over JSON.
 
 - `tenant` defaults to `"otto"`.
@@ -296,7 +309,7 @@ system, chunked into requests of 200.
 | Symptom | Cause |
 |---|---|
 | Everything `rejected`, "invalid or missing email" | wrong column name, or CSV delimiter isn't a comma |
-| Everything `quarantined` | `tcpa_text` / `tcpa_consent_at` column missing or empty — no consent, no contact |
+| Everything `quarantined` | `tcpa_text` / `tcpa_date` column missing or empty — no consent, no contact |
 | Names arrive mojibake'd (`JosÃ©`) | encoding probe guessed wrong; re-run with `--encoding cp1252` or `--encoding utf-8` |
 | CLI exits 2 with "error rate ... exceeds" | more than 25% of records failed; inspect the rejects file, raise `--max-error-rate` only once you know why |
 | `--enroll` refuses to run | add `--yes` |

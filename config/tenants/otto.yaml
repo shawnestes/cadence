@@ -7,17 +7,30 @@ identity:
 fields:
   first_name: {from: first_name, normalize: name}
   last_name:  {from: last_name,  normalize: name}
-  address1:   {from: address}
+  address1:   {from: address, required: false}
   city:       {from: city}
   state:      {from: state, normalize: state}
   zip:        {from: zip,   normalize: zip5}
   phone:      {from: phone, normalize: phone_e164, required: false}
+  # Prior carrier, e.g. "Allstate", "State Farm Insurance", "other".
+  # Optional: not every vendor export carries it.
+  current_company: {from: current_company, required: false}
+  # Lead-certification artifacts. Third-party evidence of the consent event,
+  # retained alongside the TCPA text. Both are optional: an export may predate
+  # certification or omit it, and a missing cert must not reject the record.
+  # These also land in consent_proof.raw.attributes with every proof row.
+  jornaya_id:        {from: jornaya_id,        required: false}
+  trusted_form_cert: {from: trusted_form_cert, required: false}
 repeating:
   vehicles:
-    columns: "vehicle_{n}_{field}"
+    # Flat, single-vehicle columns ("make", "model") rather than indexed
+    # ("vehicle_1_make"). `max: 1` is load-bearing: the collector formats this
+    # template once per n, so a max above 1 would re-read the same two columns
+    # and emit duplicate vehicles.
+    columns: "{field}"
     json_key: vehicles
     fields: [year, make, model, vin]
-    max: 5
+    max: 1
 derived:
   vehicle_count:       count(vehicles)
   vehicle_makes:       list(vehicles.make)
@@ -27,8 +40,8 @@ consent:
   required: true
   source_label: otto_tcpa
   text:        {from: tcpa_text}
-  captured_at: {from: tcpa_consent_at}
+  captured_at: {from: tcpa_date}
   source_url:  {from: consent_url, required: false}
   form_id:     {from: lead_id,     required: false}
-  ip:          {from: consent_ip,  required: false, normalize: ip}
-  user_agent:  {from: consent_ua,  required: false}
+  ip:          {from: ip,          required: false, normalize: ip}
+  user_agent:  {from: user_agent,  required: false}

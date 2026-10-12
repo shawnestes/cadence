@@ -18,11 +18,15 @@ def test_loads_otto_mapping_from_repo_config():
     assert m.external_id_source == "user_id"
     assert m.fields["state"].normalize == "state"
     assert m.fields["phone"].required is False
+    assert m.fields["jornaya_id"].required is False
+    assert m.fields["trusted_form_cert"].required is False
+    assert m.fields["current_company"].required is False
+    assert m.fields["address1"].required is False
     assert m.consent.required is True
     assert m.consent.channels == (1,)
     assert m.consent.source_label == "otto_tcpa"
     assert m.consent.text.source == "tcpa_text"
-    assert m.consent.captured_at.source == "tcpa_consent_at"
+    assert m.consent.captured_at.source == "tcpa_date"
     assert "consent_url" == m.consent.optional["source_url"].source
 
 
@@ -30,9 +34,10 @@ def test_otto_repeating_and_derived():
     m = load_tenant_mapping("otto")
     (vehicles,) = m.repeating
     assert vehicles.name == "vehicles"
-    assert vehicles.column_template == "vehicle_{n}_{field}"
+    # Flat single-vehicle columns ("make"/"model"), not indexed.
+    assert vehicles.column_template == "{field}"
     assert vehicles.fields == ("year", "make", "model", "vin")
-    assert vehicles.max == 5
+    assert vehicles.max == 1
     names = {d.name: (d.func, d.source, d.field) for d in m.derived}
     assert names["vehicle_count"] == ("count", "vehicles", None)
     assert names["vehicle_makes"] == ("list", "vehicles", "make")

@@ -35,6 +35,11 @@ os.environ.setdefault("CADENCE_API_KEY", "test-api-key")
 # Tests must never hit the real Anthropic API: real env vars take precedence
 # over .env in pydantic-settings, so this forces the mock backend.
 os.environ["CADENCE_AI_BACKEND"] = "mock"
+# Same reasoning for sending: `CADENCE_ESP_BACKEND=ses` in .env (live sending)
+# would otherwise make the send-worker tests issue real SES API calls and real
+# SMTP conversations. The factory short-circuits to NoopESP on any value but
+# "ses", so pin it here rather than relying on the settings default.
+os.environ["CADENCE_ESP_BACKEND"] = "noop"
 
 import asyncio
 from pathlib import Path

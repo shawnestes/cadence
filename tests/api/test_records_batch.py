@@ -11,14 +11,14 @@ from app.core.db import async_session_factory
 
 _GOOD_CONSENT = {
     "tcpa_text": "By submitting you agree to receive emails.",
-    "tcpa_consent_at": "2026-01-15T10:30:00Z",
+    "tcpa_date": "2026-01-15T10:30:00Z",
 }
 
 
 def _record(email: str, **overrides) -> dict:
     row = {
         "email": email, "user_id": "otto-1", "first_name": "Shawn",
-        "last_name": "Estes", "address": "100 Congress Ave", "city": "Austin",
+        "last_name": "Estes", "city": "Austin",
         "state": "TX", "zip": "78701", "phone": "5125551234",
         **_GOOD_CONSENT,
     }

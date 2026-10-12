@@ -22,3 +22,6 @@ htmlcov/
 # Bulk record loader output — contains PII and verbatim TCPA consent text
 import-logs/
 *-rejects.csv
+
+# Local .env backups (contain secrets)
+.env.bak.*

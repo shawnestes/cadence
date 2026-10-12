@@ -1,9 +1,13 @@
-"""Row mapping: raw dict -> MappedRow. Pure, no DB."""
+"""Row mapping: raw dict -> MappedRow. Pure, no DB.
+
+OTTO's export is flat and single-vehicle: `make`/`model` columns rather than
+indexed `vehicle_{n}_{field}`, and consent arrives as `tcpa_date` / `ip` /
+`user_agent`. The mapping's `max: 1` means one vehicle per record by design.
+"""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pytest
 
@@ -17,23 +21,22 @@ _GOOD_ROW = {
     "user_id": "otto-991",
     "first_name": "SHAWN",
     "last_name": "estes",
-    "address": "100 Congress Ave",
     "city": "Austin",
     "state": "texas",
     "zip": "78701-1234",
     "phone": "(512) 555-1234",
-    "vehicle_1_year": "2019",
-    "vehicle_1_make": "Toyota",
-    "vehicle_1_model": "Camry",
-    "vehicle_2_year": "2021",
-    "vehicle_2_make": "HONDA",
-    "vehicle_2_model": "CR-V",
+    "year": "2019",
+    "make": "Toyota",
+    "model": "Camry",
+    "current_company": "Allstate",
+    "jornaya_id": "2EAB0F47-BA9A-3840-4593-8EC5D6E057BB",
+    "trusted_form_cert": "https://cert.trustedform.com/abc123",
     "tcpa_text": "By submitting you agree to receive emails.",
-    "tcpa_consent_at": "2026-01-15T10:30:00Z",
+    "tcpa_date": "2026-01-15T10:30:00Z",
     "consent_url": "https://otto.example/quote",
     "lead_id": "form-7",
-    "consent_ip": "203.0.113.9",
-    "consent_ua": "Mozilla/5.0",
+    "ip": "203.0.113.9",
+    "user_agent": "Mozilla/5.0",
 }
 
 
@@ -53,30 +56,51 @@ def test_good_row_maps_to_ok():
     assert r.attributes["user_id"] == "otto-991"
 
 
-def test_vehicles_and_derived_fields():
+def test_vehicle_and_derived_fields():
     r = map_row(_GOOD_ROW, _OTTO).record
     assert r.attributes["vehicles"] == [
         {"year": 2019, "make": "Toyota", "model": "Camry"},
-        {"year": 2021, "make": "HONDA", "model": "CR-V"},
     ]
-    assert r.attributes["vehicle_count"] == 2
-    assert r.attributes["vehicle_makes"] == ["toyota", "honda"]
-    assert r.attributes["newest_vehicle_year"] == 2021
+    assert r.attributes["vehicle_count"] == 1
+    assert r.attributes["vehicle_makes"] == ["toyota"]
+    assert r.attributes["newest_vehicle_year"] == 2019
+
+
+def test_lead_certification_artifacts_are_retained():
+    """Jornaya + TrustedForm are the third-party record of the consent event."""
+    r = map_row(_GOOD_ROW, _OTTO).record
+    assert r.attributes["jornaya_id"] == "2EAB0F47-BA9A-3840-4593-8EC5D6E057BB"
+    assert r.attributes["trusted_form_cert"] == "https://cert.trustedform.com/abc123"
+    assert r.attributes["current_company"] == "Allstate"
+
+
+@pytest.mark.parametrize(
+    "column", ["jornaya_id", "trusted_form_cert", "current_company"]
+)
+def test_optional_lead_fields_absent_is_explicit_none_not_reject(column):
+    """An export without certification must still load -- these are optional."""
+    m = map_row({**_GOOD_ROW, column: ""}, _OTTO)
+    assert m.outcome == "ok"
+    assert m.record.attributes[column] is None
+
+
+def test_absent_address_column_does_not_reject():
+    """OTTO's export carries no mailing address; address1 is optional."""
+    m = map_row(_GOOD_ROW, _OTTO)
+    assert m.outcome == "ok"
+    assert m.record.attributes["address1"] is None
 
 
 def test_jsonl_vehicle_array_is_accepted():
-    row = {**_GOOD_ROW}
-    for k in list(row):
-        if k.startswith("vehicle_"):
-            del row[k]
+    row = {k: v for k, v in _GOOD_ROW.items() if k not in ("year", "make", "model")}
     row["vehicles"] = [{"year": "2018", "make": "Ford", "model": "F-150"}]
     r = map_row(row, _OTTO).record
     assert r.attributes["vehicles"] == [{"year": 2018, "make": "Ford", "model": "F-150"}]
     assert r.attributes["newest_vehicle_year"] == 2018
 
 
-def test_no_vehicles_yields_zero_count_and_none_year():
-    row = {k: v for k, v in _GOOD_ROW.items() if not k.startswith("vehicle_")}
+def test_no_vehicle_yields_zero_count_and_none_year():
+    row = {k: v for k, v in _GOOD_ROW.items() if k not in ("year", "make", "model")}
     r = map_row(row, _OTTO).record
     assert r.attributes["vehicles"] == []
     assert r.attributes["vehicle_count"] == 0
@@ -85,18 +109,19 @@ def test_no_vehicles_yields_zero_count_and_none_year():
 
 
 def test_unparseable_vehicle_year_does_not_crash_max():
-    row = {**_GOOD_ROW, "vehicle_1_year": "N/A", "vehicle_2_year": ""}
+    row = {**_GOOD_ROW, "year": "N/A"}
     r = map_row(row, _OTTO).record
     assert r.attributes["newest_vehicle_year"] is None
-    assert r.attributes["vehicle_count"] == 2
+    # make/model still present, so the vehicle itself survives.
+    assert r.attributes["vehicle_count"] == 1
 
 
-def test_vehicles_beyond_max_are_dropped():
-    row = {**_GOOD_ROW}
-    for n in range(3, 9):
-        row[f"vehicle_{n}_make"] = f"Make{n}"
-    r = map_row(row, _OTTO).record
-    assert r.attributes["vehicle_count"] == 5
+def test_flat_columns_never_yield_more_than_one_vehicle():
+    """`max: 1` guards the flat template: the collector must not re-read
+    `make`/`model` per index and emit duplicate vehicles."""
+    r = map_row(_GOOD_ROW, _OTTO).record
+    assert r.attributes["vehicle_count"] == 1
+    assert len(r.attributes["vehicles"]) == 1
 
 
 def test_missing_optional_phone_is_explicit_none():
@@ -120,17 +145,17 @@ def test_missing_consent_text_quarantines():
 
 
 def test_missing_consent_timestamp_quarantines():
-    m = map_row({**_GOOD_ROW, "tcpa_consent_at": ""}, _OTTO)
+    m = map_row({**_GOOD_ROW, "tcpa_date": ""}, _OTTO)
     assert m.outcome == "quarantine"
 
 
 def test_unparseable_consent_timestamp_quarantines():
-    m = map_row({**_GOOD_ROW, "tcpa_consent_at": "last tuesday"}, _OTTO)
+    m = map_row({**_GOOD_ROW, "tcpa_date": "last tuesday"}, _OTTO)
     assert m.outcome == "quarantine"
 
 
 def test_consent_timestamp_without_tz_is_treated_as_utc():
-    m = map_row({**_GOOD_ROW, "tcpa_consent_at": "2026-01-15 10:30:00"}, _OTTO)
+    m = map_row({**_GOOD_ROW, "tcpa_date": "2026-01-15 10:30:00"}, _OTTO)
     assert m.record.consent.captured_at == datetime(2026, 1, 15, 10, 30, tzinfo=timezone.utc)
 
 
