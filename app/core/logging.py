@@ -48,10 +48,20 @@ def configure_logging(level: str) -> None:
     root_logger.addHandler(handler)
     root_logger.setLevel(log_level)
 
-    for noisy in ("uvicorn", "uvicorn.access", "uvicorn.error", "sqlalchemy", "sqlalchemy.engine"):
+    for noisy in ("uvicorn", "uvicorn.access", "uvicorn.error"):
         lg = logging.getLogger(noisy)
         lg.handlers.clear()
         lg.propagate = True
         lg.setLevel(log_level)
+
+    # SQLAlchemy's engine logger emits every statement and every parameter set
+    # at INFO, which buries application events and leaks row values into the
+    # journal. Keep it at WARNING unless the operator explicitly asks for DEBUG.
+    sqlalchemy_level = logging.DEBUG if log_level <= logging.DEBUG else logging.WARNING
+    for noisy in ("sqlalchemy", "sqlalchemy.engine"):
+        lg = logging.getLogger(noisy)
+        lg.handlers.clear()
+        lg.propagate = True
+        lg.setLevel(sqlalchemy_level)
 
     _configured = True
