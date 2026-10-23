@@ -24,10 +24,13 @@ from app.workers import (
 )
 
 
-async def main() -> None:
-    configure_logging(get_settings().log_level)
-    log = structlog.get_logger(__name__)
+def build_scheduler() -> AsyncIOScheduler:
+    """Register every job and return the scheduler, unstarted.
 
+    Separate from `main` so tests can evaluate the registration block without
+    starting a daemon. A bad reference in an `add_job` argument used to be
+    invisible to the suite and only surfaced as a crash-looping service.
+    """
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         otto_sync.run_once,
@@ -131,11 +134,19 @@ async def main() -> None:
     scheduler.add_job(
         postmaster_sync.run_once,
         'interval',
-        seconds=settings.postmaster_sync_interval_seconds,
+        seconds=get_settings().postmaster_sync_interval_seconds,
         id='postmaster_sync',
         max_instances=1,
         coalesce=True,
     )
+    return scheduler
+
+
+async def main() -> None:
+    configure_logging(get_settings().log_level)
+    log = structlog.get_logger(__name__)
+
+    scheduler = build_scheduler()
     scheduler.start()
     log.info("scheduler.started", jobs=[j.id for j in scheduler.get_jobs()])
 
