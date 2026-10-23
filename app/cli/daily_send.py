@@ -22,10 +22,25 @@ Safety properties:
 * `--limit` is required to be positive and is the hard ceiling on rows created.
 * `--dry-run` reports the exact set that would be queued and writes nothing.
 
+Warm-up ramp
+------------
+
+`--ramp` replaces `--limit` with a schedule indexed by how many calendar days
+this campaign has been sending, derived from `min(sent_at)` on its own sends.
+No state file, nothing to keep in sync -- the campaign's history *is* the
+cursor, so a skipped day does not shift the ramp and a re-run on the same day
+reuses the same rung.
+
+A new sending domain has no reputation. Mailbox providers read a jump from a
+near-zero baseline to full volume as spam behaviour, so the published guidance
+is to grow gradually and never roughly double day over day. The rungs below
+reach 50/day over two weeks and hold.
+
 Usage:
 
+    uv run python -m app.cli.daily_send --campaign OttoDaily --ramp
     uv run python -m app.cli.daily_send --campaign OttoDaily --limit 50
-    uv run python -m app.cli.daily_send --campaign OttoDaily --limit 50 --dry-run
+    uv run python -m app.cli.daily_send --campaign OttoDaily --ramp --dry-run
 """
 
 from __future__ import annotations
@@ -42,6 +57,32 @@ from app.core.logging import configure_logging
 from app.core.config import get_settings
 
 log = structlog.get_logger(__name__)
+
+# (day_offset, daily_cap) -- day 0 is the campaign's first sending day. The cap
+# in force is the last rung whose offset has been reached, so the final entry
+# is the steady-state ceiling and the ramp never needs an end date.
+# Growth stays at or under ~50% per step: a 10 -> 50 jump is the exact spike
+# that gets a cold domain filtered.
+RAMP: tuple[tuple[int, int], ...] = (
+    (0, 10),
+    (2, 15),
+    (4, 20),
+    (6, 25),
+    (8, 30),
+    (10, 40),
+    (12, 50),
+)
+
+
+def ramp_limit(days_sending: int) -> int:
+    """Daily cap for a campaign that has been sending for `days_sending` days."""
+    cap = RAMP[0][1]
+    for offset, value in RAMP:
+        if days_sending >= offset:
+            cap = value
+        else:
+            break
+    return cap
 
 # Shared predicate for "eligible, never-mailed recipient on this campaign's
 # vertical", newest consent first. Used by both the dry run and the insert so
@@ -71,6 +112,18 @@ _RESOLVE_CAMPAIGN = text("""
      WHERE c.name = :campaign
 """)
 
+# Days this campaign has been sending: 0 on the first day, counted from the
+# oldest dispatched send. NULL (never sent) also yields 0 via COALESCE.
+_DAYS_SENDING = text("""
+    SELECT COALESCE(
+             (now()::date - MIN(sent_at)::date),
+             0
+           ) AS days
+      FROM sends
+     WHERE campaign_id = :campaign_id
+       AND sent_at IS NOT NULL
+""")
+
 _PREVIEW = text(f"""
     SELECT r.email, r.attributes->>'state' AS state, cp.consent_at
       FROM recipients r
@@ -91,7 +144,7 @@ _INSERT = text(f"""
 """)
 
 
-async def run(campaign: str, limit: int, dry_run: bool) -> int:
+async def run(campaign: str, limit: int | None, ramp: bool, dry_run: bool) -> int:
     settings = get_settings()
 
     async with async_session_factory() as session:
@@ -146,6 +199,20 @@ async def run(campaign: str, limit: int, dry_run: bool) -> int:
             "limit": limit,
         }
 
+        if ramp:
+            days = (await session.execute(
+                _DAYS_SENDING, {"campaign_id": c["id"]}
+            )).scalar_one()
+            limit = ramp_limit(int(days))
+            scope["limit"] = limit
+            log.info(
+                "daily_send.ramp",
+                campaign=campaign,
+                days_sending=int(days),
+                limit=limit,
+            )
+            print(f"ramp: day {int(days)} of sending -> limit {limit}")
+
         if dry_run:
             preview = (await session.execute(_PREVIEW, scope)).mappings().all()
             print(f"dry run: would queue {len(preview)} send(s) for {campaign}")
@@ -186,9 +253,15 @@ def main() -> int:
         description="Queue a daily batch of sends for one campaign."
     )
     parser.add_argument("--campaign", required=True, help="campaign name")
-    parser.add_argument(
-        "--limit", required=True, type=int,
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument(
+        "--limit", type=int,
         help="maximum sends to queue this run (hard ceiling)",
+    )
+    group.add_argument(
+        "--ramp", action="store_true",
+        help="derive the cap from the warm-up schedule and this campaign's "
+             "own sending history",
     )
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -196,12 +269,12 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if args.limit < 1:
+    if args.limit is not None and args.limit < 1:
         print("error: --limit must be >= 1", file=sys.stderr)
         return 2
 
     configure_logging(get_settings().log_level)
-    return asyncio.run(run(args.campaign, args.limit, args.dry_run))
+    return asyncio.run(run(args.campaign, args.limit, args.ramp, args.dry_run))
 
 
 if __name__ == "__main__":
