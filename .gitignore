@@ -25,3 +25,4 @@ import-logs/
 
 # Local .env backups (contain secrets)
 .env.bak.*
+postmaster-sa.json

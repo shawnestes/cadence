@@ -40,6 +40,10 @@ os.environ["CADENCE_AI_BACKEND"] = "mock"
 # SMTP conversations. The factory short-circuits to NoopESP on any value but
 # "ses", so pin it here rather than relying on the settings default.
 os.environ["CADENCE_ESP_BACKEND"] = "noop"
+# And for Postmaster: a credentials path in .env would otherwise make these
+# tests sign a real JWT and query Google.
+os.environ["CADENCE_POSTMASTER_BACKEND"] = "mock"
+os.environ.pop("CADENCE_POSTMASTER_CREDENTIALS_PATH", None)
 
 import asyncio
 from pathlib import Path

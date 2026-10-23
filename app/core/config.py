@@ -97,6 +97,19 @@ class Settings(BaseSettings):
     known_scanner_uas: str | list[str] = ["SafeLinks", "Proofpoint", "Barracuda", "DLP-"]
     attribution_window_days: int = 30
 
+    # Google Postmaster Tools (v2). `postmaster_backend`: "google" | "mock".
+    # Leaving postmaster_credentials_path unset disables the sync entirely.
+    postmaster_backend: str = "google"
+    postmaster_credentials_path: str | None = None
+    postmaster_domain: str | None = None
+    postmaster_lookback_days: int = 7
+    postmaster_sync_interval_seconds: int = 21600  # 6h; the API updates daily
+    # Gmail reports a ratio: 0.001 == 0.1% (its recommended target) and
+    # 0.003 == 0.3% (the hard ceiling above which mitigation is unavailable).
+    postmaster_spam_rate_warn: float = 0.001
+    postmaster_spam_rate_critical: float = 0.003
+
+
 
 @lru_cache
 def get_settings() -> Settings:

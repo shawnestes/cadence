@@ -12,6 +12,7 @@ from app.workers import (
     engagement_scorer,
     otto_sync,
     partition_maintenance,
+    postmaster_sync,
     profile_refresh,
     reputation_checks,
     reputation_monitor,
@@ -122,6 +123,16 @@ async def main() -> None:
         hour=3,
         minute=30,
         id='profile_refresh_nightly',
+        max_instances=1,
+        coalesce=True,
+    )
+    # Gmail's spam rate is only visible through Postmaster Tools; SES never
+    # sees a Gmail complaint. No-ops until credentials are configured.
+    scheduler.add_job(
+        postmaster_sync.run_once,
+        'interval',
+        seconds=settings.postmaster_sync_interval_seconds,
+        id='postmaster_sync',
         max_instances=1,
         coalesce=True,
     )
