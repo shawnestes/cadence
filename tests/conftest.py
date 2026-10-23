@@ -171,6 +171,7 @@ async def _clean_test_rows(request: pytest.FixtureRequest):
                 {"pat": "%@cadencetests.io"},
             )
             await s.execute(text("DELETE FROM alerts WHERE tenant = 'otto'"))
+            await s.execute(text("DELETE FROM postmaster_daily"))
             await s.commit()
 
     await _purge()

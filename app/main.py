@@ -10,6 +10,7 @@ from app.api import (
     ingest,
     metrics,
     origin_platform,
+    postmaster,
     recipients,
     segments,
     sending_identities,
@@ -78,6 +79,10 @@ app.include_router(
 )
 app.include_router(
     alerts.router,
+    prefix="/api",
+)
+app.include_router(
+    postmaster.router,
     prefix="/api",
 )
 app.include_router(

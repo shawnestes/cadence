@@ -22,7 +22,7 @@ class _Boom:
 @pytest.mark.asyncio
 async def test_noop_when_no_client(monkeypatch):
     monkeypatch.setattr(postmaster_sync, "get_postmaster_client", lambda: None)
-    assert await postmaster_sync.run_once() == {"checked": 0, "days": 0}
+    assert await postmaster_sync.run_once() == {"checked": 0, "days": 0, "stored": 0}
 
 
 @pytest.mark.asyncio
@@ -33,7 +33,7 @@ async def test_api_failure_does_not_raise(monkeypatch):
         postmaster_sync, "get_settings",
         lambda: _settings(domain="domains/x.com"),
     )
-    assert await postmaster_sync.run_once() == {"checked": 0, "days": 0}
+    assert await postmaster_sync.run_once() == {"checked": 0, "days": 0, "stored": 0}
 
 
 def _settings(**over):
@@ -65,7 +65,7 @@ async def test_ambiguous_domain_is_refused(monkeypatch):
 
     monkeypatch.setattr(postmaster_sync, "get_postmaster_client", lambda: Two())
     monkeypatch.setattr(postmaster_sync, "get_settings", lambda: _settings())
-    assert await postmaster_sync.run_once() == {"checked": 0, "days": 0}
+    assert await postmaster_sync.run_once() == {"checked": 0, "days": 0, "stored": 0}
 
 
 @pytest.mark.asyncio
@@ -86,7 +86,7 @@ async def test_no_data_leaves_alert_state_untouched(monkeypatch):
     )
     monkeypatch.setattr(postmaster_sync, "_apply_alert_state", spy)
 
-    assert await postmaster_sync.run_once() == {"checked": 0, "days": 0}
+    assert await postmaster_sync.run_once() == {"checked": 0, "days": 0, "stored": 0}
     assert calls == [], "alert state must not be evaluated without data"
 
 
@@ -115,7 +115,8 @@ async def test_latest_day_is_evaluated(monkeypatch):
     monkeypatch.setattr(postmaster_sync, "_apply_alert_state", spy)
 
     result = await postmaster_sync.run_once()
-    assert result == {"checked": 1, "days": 2}
+    assert result["checked"] == 1
+    assert result["days"] == 2
     assert captured["value"] == 0.0042
     assert captured["metric"] == "gmail_spam_rate"
     assert captured["tenant"] == "otto"

@@ -3,6 +3,7 @@ from app.models.base import Base, Citext, TimestampMixin, uuid7
 from app.models.campaign import Campaign
 from app.models.event import Event
 from app.models.journey import Journey
+from app.models.postmaster_daily import PostmasterDaily
 from app.models.recipient import Recipient
 from app.models.send import Send
 from app.models.sending_identity import SendingIdentity
@@ -20,6 +21,7 @@ __all__ = [
     "Citext",
     "Event",
     "Journey",
+    "PostmasterDaily",
     "Recipient",
     "Send",
     "SendingIdentity",
