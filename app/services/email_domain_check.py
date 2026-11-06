@@ -55,10 +55,19 @@ async def _has_address(resolver: aiodns.DNSResolver, domain: str, timeout: float
     return False if definitive_misses == 2 else None
 
 
-async def _classify(
+async def _address_verdict(
     resolver: aiodns.DNSResolver, domain: str, timeout: float
 ) -> tuple[str | None, bool]:
-    """Return (undeliverable reason or None, inconclusive)."""
+    """Implicit-MX verdict (RFC 5321 §5.1) for a domain without MX records."""
+    has_address = await _has_address(resolver, domain, timeout)
+    if has_address is None:
+        return None, True
+    return (None, False) if has_address else ("no MX or address record", False)
+
+
+async def _classify_unbounded(
+    resolver: aiodns.DNSResolver, domain: str, timeout: float
+) -> tuple[str | None, bool]:
     try:
         result = await asyncio.wait_for(resolver.query_dns(domain, "MX"), timeout)
     except aiodns.error.DNSError as exc:
@@ -69,17 +78,29 @@ async def _classify(
             return "malformed domain name", False
         if code != aiodns.error.ARES_ENODATA:
             return None, True
-        has_address = await _has_address(resolver, domain, timeout)
-        if has_address is None:
-            return None, True
-        return (None, False) if has_address else ("no MX or address record", False)
+        return await _address_verdict(resolver, domain, timeout)
     except asyncio.TimeoutError:
         return None, True
 
     exchanges = [getattr(rec.data, "exchange", "") for rec in result.answer]
-    if exchanges and all(not str(x).strip(".") for x in exchanges):
+    if not exchanges:
+        return await _address_verdict(resolver, domain, timeout)
+    if all(not str(x).strip(".") for x in exchanges):
         return "domain accepts no mail (null MX)", False
     return None, False
+
+
+async def _classify(
+    resolver: aiodns.DNSResolver, domain: str, timeout: float
+) -> tuple[str | None, bool]:
+    """Return (undeliverable reason or None, inconclusive).
+
+    ``timeout`` bounds the whole MX -> A -> AAAA sequence, not each query.
+    """
+    try:
+        return await asyncio.wait_for(_classify_unbounded(resolver, domain, timeout), timeout)
+    except asyncio.TimeoutError:
+        return None, True
 
 
 async def find_undeliverable_domains(

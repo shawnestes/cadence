@@ -92,6 +92,47 @@ async def test_inconclusive_answers_let_the_domain_through() -> None:
     assert result == {}
 
 
+async def test_empty_mx_answer_falls_back_to_address_records() -> None:
+    fake = _resolver(
+        {
+            ("empty-dead.example", "MX"): _mx(),
+            ("empty-dead.example", "A"): _NODATA,
+            ("empty-dead.example", "AAAA"): _NODATA,
+            ("empty-live.example", "MX"): _mx(),
+            ("empty-live.example", "A"): _a(),
+        }
+    )
+    result = await find_undeliverable_domains(
+        ["empty-dead.example", "empty-live.example"], resolver_factory=lambda: fake
+    )
+    assert result == {"empty-dead.example": "no MX or address record"}
+
+
+async def test_timeout_bounds_the_whole_lookup_sequence() -> None:
+    # Each query alone finishes inside the timeout; MX + A + AAAA together don't.
+    class _Slow(_FakeResolver):
+        async def query_dns(self, domain: str, qtype: str):
+            if domain != "gmail.com":
+                await asyncio.sleep(0.15)
+            return await super().query_dns(domain, qtype)
+
+    fake = _Slow(
+        {
+            ("gmail.com", "MX"): _mx("gmail-smtp-in.l.google.com"),
+            ("slowchain.example", "MX"): _NODATA,
+            ("slowchain.example", "A"): _NODATA,
+            ("slowchain.example", "AAAA"): _NODATA,
+        }
+    )
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    result = await find_undeliverable_domains(
+        ["slowchain.example"], resolver_factory=lambda: fake, lookup_timeout=0.25
+    )
+    assert result == {}
+    assert loop.time() - started < 0.4
+
+
 @pytest.mark.parametrize("probe_failure", [_SERVFAIL, _HANG])
 async def test_skips_the_check_when_the_resolver_cannot_answer(probe_failure: object) -> None:
     # The resolver says every domain is NXDOMAIN, but it can't resolve gmail.com
