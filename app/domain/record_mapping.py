@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from app.domain.email_typos import probable_typo
 from app.domain.normalizers import NORMALIZERS, normalize_email, normalize_year
 from app.domain.tenant_spec import DerivedSpec, RepeatingSpec, TenantMapping
 
@@ -153,6 +154,14 @@ def map_row(row: Mapping[str, Any], mapping: TenantMapping) -> MappedRow:
         return MappedRow(
             outcome=OUTCOME_REJECT,
             errors=(f"invalid or missing email in column {mapping.email_source!r}",),
+            record=None,
+        )
+    domain = email.rpartition("@")[2]
+    intended = probable_typo(domain)
+    if intended is not None:
+        return MappedRow(
+            outcome=OUTCOME_REJECT,
+            errors=(f"probable typo in email domain {domain!r} (likely {intended})",),
             record=None,
         )
 

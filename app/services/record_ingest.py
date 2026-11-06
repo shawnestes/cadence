@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any
@@ -40,6 +40,7 @@ from app.domain.record_mapping import (
 )
 from app.domain.tenant_spec import TenantMapping
 from app.models.base import uuid7
+from app.services.email_domain_check import find_undeliverable_domains
 
 log = structlog.get_logger(__name__)
 
@@ -320,6 +321,34 @@ class RowOutcome:
     unknown_domain: str | None = None
 
 
+def undeliverable_error(
+    record: NormalizedRecord, undeliverable: Mapping[str, str]
+) -> str | None:
+    """Reject reason when the record's email domain cannot receive mail.
+
+    Shared by ingest_one_row and the CLI dry run so both report the same rows.
+    """
+    domain = record.email.rpartition("@")[2]
+    reason = undeliverable.get(domain)
+    return None if reason is None else f"undeliverable email domain {domain!r}: {reason}"
+
+
+async def resolve_undeliverable(
+    rows: Iterable[Mapping[str, Any]], mapping: TenantMapping
+) -> dict[str, str]:
+    """DNS-check the email domains of rows that would otherwise load.
+
+    Rows already rejected or quarantined by map_row are skipped: their domain
+    can't change their outcome, so resolving it is wasted work.
+    """
+    domains: set[str] = set()
+    for raw in rows:
+        mapped = map_row(raw, mapping)
+        if mapped.outcome == OUTCOME_OK and mapped.record is not None:
+            domains.add(mapped.record.email.rpartition("@")[2])
+    return await find_undeliverable_domains(domains)
+
+
 IngestRecordFn = Callable[..., Awaitable[tuple[str, str | None]]]
 QuarantineRowFn = Callable[..., Awaitable[None]]
 
@@ -334,6 +363,7 @@ async def ingest_one_row(
     now: datetime,
     ingest_record_fn: IngestRecordFn = ingest_record,
     quarantine_row_fn: QuarantineRowFn = quarantine_row,
+    undeliverable: Mapping[str, str] | None = None,
 ) -> tuple[RowOutcome, NormalizedRecord | None]:
     """Map one raw row and dispatch it: load, quarantine, or reject.
 
@@ -358,6 +388,9 @@ async def ingest_one_row(
     mapped = map_row(raw, mapping)
     if mapped.outcome == OUTCOME_OK:
         assert mapped.record is not None
+        reason = undeliverable_error(mapped.record, undeliverable or {})
+        if reason is not None:
+            return RowOutcome(status="rejected", errors=(reason,)), None
         status, unknown = await ingest_record_fn(
             session, tenant=tenant, vertical=vertical, record=mapped.record, now=now
         )

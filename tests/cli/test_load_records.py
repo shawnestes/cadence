@@ -169,6 +169,57 @@ async def test_dry_run_touches_no_db(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("dry_run", [False, True])
+async def test_typo_and_dead_domain_rows_are_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dry_run: bool
+):
+    good = f"good-{uuid.uuid4()}@cadencetests.io"
+    typo = f"typo-{uuid.uuid4()}@gmai.com"
+    dead = f"dead-{uuid.uuid4()}@dead.cadencetests.io"
+    path = tmp_path / "leads.csv"
+    errors_out = tmp_path / "rejects.csv"
+    _write_csv(path, [_row(good), _row(typo), _row(dead)])
+
+    async def _dead_domains(domains, **_kwargs) -> dict[str, str]:
+        return {d: "domain does not exist (NXDOMAIN)" for d in domains if d.startswith("dead.")}
+
+    monkeypatch.setattr(
+        "app.services.record_ingest.find_undeliverable_domains", _dead_domains
+    )
+
+    code = await run(
+        _args(
+            file=str(path), errors_out=str(errors_out), max_error_rate=1.0, dry_run=dry_run
+        )
+    )
+    assert code == 0
+
+    rejects = {
+        r["row_number"]: (r["outcome"], r["errors"])
+        for r in csv.DictReader(errors_out.open(newline="", encoding="utf-8"))
+    }
+    assert rejects == {
+        "2": ("reject", "probable typo in email domain 'gmai.com' (likely gmail.com)"),
+        "3": (
+            "reject",
+            "undeliverable email domain 'dead.cadencetests.io': "
+            "domain does not exist (NXDOMAIN)",
+        ),
+    }
+
+    async with async_session_factory() as s:
+        stored = set(
+            (
+                await s.execute(
+                    text("SELECT email FROM recipients WHERE tenant=:t AND email IN (:a, :b, :c)"),
+                    {"t": _TENANT, "a": good, "b": typo, "c": dead},
+                )
+            ).scalars()
+        )
+    assert stored == (set() if dry_run else {good})
+
+
+@pytest.mark.asyncio
 async def test_exit_code_2_when_error_rate_exceeded(tmp_path: Path):
     path = tmp_path / "leads.csv"
     _write_csv(path, [_row("bad-one"), _row("bad-two"), _row(f"ok-{uuid.uuid4()}@cadencetests.io")])

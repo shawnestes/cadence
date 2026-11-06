@@ -13,7 +13,12 @@ from app.models.recipient import Recipient
 from app.models.workflow import Workflow
 from app.schemas.recipient import RecipientIngestIn, RecipientIngestOut
 from app.schemas.records import RecordBatchIn, RecordBatchOut, RecordResult
-from app.services.record_ingest import IngestCounters, flush_unknown_domains, ingest_one_row
+from app.services.record_ingest import (
+    IngestCounters,
+    flush_unknown_domains,
+    ingest_one_row,
+    resolve_undeliverable,
+)
 from app.services.tenant_mapping import load_tenant_mapping
 
 router = APIRouter(tags=["ingest"])
@@ -144,6 +149,11 @@ async def ingest_records_batch(
     counters = IngestCounters()
     results: list[RecordResult] = []
     unknown_domains: set[str] = set()
+    # Resolved per request, never cached across requests: a domain registered
+    # after a failed lookup must become loadable again.
+    undeliverable = await resolve_undeliverable(
+        (raw for raw in payload.records if isinstance(raw, dict)), mapping
+    )
 
     for index, raw in enumerate(payload.records):
         counters.read += 1
@@ -161,6 +171,7 @@ async def ingest_records_batch(
                     vertical=payload.vertical,
                     mapping=mapping,
                     now=now,
+                    undeliverable=undeliverable,
                 )
         except Exception as exc:  # noqa: BLE001 - isolate one bad row from the rest of the batch
             counters.rejected += 1

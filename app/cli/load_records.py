@@ -5,7 +5,8 @@
 
 Rows without resolvable TCPA consent are written to contact_quarantine and no
 recipients row is created (SPEC-segmentation §9). Rows that cannot be parsed at
-all go to the rejects file only.
+all, whose email domain is a probable typo of a major provider, or whose email
+domain cannot receive mail (DNS) go to the rejects file only.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +42,8 @@ from app.services.record_ingest import (
     ingest_one_row,
     ingest_record,
     quarantine_row,
+    resolve_undeliverable,
+    undeliverable_error,
 )
 from app.services.tenant_mapping import load_tenant_mapping
 
@@ -164,6 +168,23 @@ def read_rows(
         raise RowDecodingError(encoding=resolved, row_number=n + 1, cause=exc) from exc
 
 
+def _prepass_rows(path: Path, encoding: str, limit: int) -> Iterator[dict[str, Any]]:
+    """Rows the main pass will read, for the DNS pre-pass.
+
+    Stops quietly at an undecodable row: the main pass reaches the same row
+    and reports it, so raising here would only pre-empt that report.
+    """
+    rows = read_rows(path, encoding=encoding)
+    if limit:
+        rows = islice(rows, limit)
+    try:
+        for _, raw in rows:
+            if isinstance(raw, dict):
+                yield raw
+    except RowDecodingError:
+        return
+
+
 async def _project_enrollment(tenant: str) -> int:
     async with async_session_factory() as session:
         workflows = (
@@ -223,6 +244,12 @@ async def run(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
+
+    # One DNS pre-pass over the file so the dry run and the real load reject
+    # exactly the same rows, and no DB session is held open during lookups.
+    undeliverable = await resolve_undeliverable(
+        _prepass_rows(path, args.encoding, args.limit), mapping
+    )
 
     unknown_domains: set[str] = set()
     batch: list[tuple[int, dict[str, Any]]] = []
@@ -292,6 +319,7 @@ async def run(args: argparse.Namespace) -> int:
                     now=now,
                     ingest_record_fn=ingest_record,
                     quarantine_row_fn=quarantine_row,
+                    undeliverable=undeliverable,
                 )
                 if outcome.unknown_domain:
                     effects.unknown_domains.add(outcome.unknown_domain)
@@ -336,7 +364,15 @@ async def run(args: argparse.Namespace) -> int:
                     break
                 if args.dry_run:
                     mapped = map_row(raw, mapping)
-                    if mapped.outcome == OUTCOME_OK:
+                    dead = (
+                        undeliverable_error(mapped.record, undeliverable)
+                        if mapped.outcome == OUTCOME_OK and mapped.record is not None
+                        else None
+                    )
+                    if dead is not None:
+                        counters.rejected += 1
+                        errors.writerow([row_number, "reject", dead, json.dumps(raw)])
+                    elif mapped.outcome == OUTCOME_OK:
                         counters.loaded += 1
                     elif mapped.outcome == OUTCOME_QUARANTINE:
                         counters.quarantined += 1

@@ -108,6 +108,24 @@ async def db_session():
             await session.close()
 
 
+@pytest.fixture(autouse=True)
+def _no_real_domain_check(monkeypatch: pytest.MonkeyPatch):
+    """Keep ingest tests off real DNS.
+
+    Every test email is @cadencetests.io, which is NXDOMAIN in public DNS, so a
+    real lookup would reject every row and make results depend on the network.
+    Patched where record_ingest uses it, which covers the CLI and the batch
+    endpoint. Tests that need specific verdicts patch the same name again.
+    """
+
+    async def _none_undeliverable(domains, **_kwargs) -> dict[str, str]:
+        return {}
+
+    monkeypatch.setattr(
+        "app.services.record_ingest.find_undeliverable_domains", _none_undeliverable
+    )
+
+
 @pytest_asyncio.fixture(autouse=True)
 async def _clean_test_rows(request: pytest.FixtureRequest):
     # Domain tests are pure logic — skip the DB purge round trips entirely.

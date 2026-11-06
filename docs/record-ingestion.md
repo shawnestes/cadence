@@ -196,6 +196,28 @@ database level).
 **It contains PII and full consent text.** `import-logs/` is gitignored. Treat
 the file as you would the source export.
 
+### Email domain checks
+
+Two checks reject a row before anything is written, on both the CLI (dry run
+included) and the batch endpoint:
+
+- **Probable typo** — the domain is a near miss of a major provider
+  (`gmai.com`, `hotmial.com`, `outookl.com`, `gmail.con`). Error:
+  `probable typo in email domain 'gmai.com' (likely gmail.com)`. Typos are
+  never auto-corrected. Country-code variants (`hotmail.ca`) and real
+  look-alikes (`mail.com`, `email.com`) are allowed; the list lives in
+  `app/domain/email_typos.py`. This runs before the consent check, so a typo
+  row without consent is a reject, not a quarantine.
+- **Undeliverable domain** — one DNS pass per run (per request on the
+  endpoint) rejects rows whose domain does not exist, publishes a null MX, has
+  no MX or address record, or is malformed. Error:
+  `undeliverable email domain 'x.com': domain does not exist (NXDOMAIN)`.
+  Timeouts and server failures let the row through, and if DNS can't resolve
+  `gmail.com` the whole check is skipped with a `domain_check_unavailable`
+  warning — a DNS outage never empties an import. Only rows that would
+  otherwise load are checked, so a re-import of an existing contact whose
+  domain has died is rejected rather than updated.
+
 ---
 
 ## 4. Sending records over HTTP
@@ -316,6 +338,7 @@ system, chunked into requests of 200.
 | Fields you didn't send came back `null` | expected — `attributes` is a full snapshot, not a merge |
 | Record loaded but contact still suppressed | expected — a re-import never clears `suppressed_at` |
 | HTTP 422 on a large payload | more than 200 records; chunk it |
+| Row rejected as "probable typo" but the domain is real | add it to `_ALLOW` in `app/domain/email_typos.py` and re-run |
 
 Related: `SPEC-segmentation.md` §9 (consent), `config/tenants/otto.yaml` (the
 mapping itself).
