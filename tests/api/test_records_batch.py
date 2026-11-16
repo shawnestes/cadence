@@ -9,6 +9,11 @@ from sqlalchemy import text
 
 from app.core.db import async_session_factory
 
+
+@pytest.fixture
+def otto_ingest_headers() -> dict[str, str]:
+    return {"X-API-Key": "test-otto-ingest-key"}
+
 _GOOD_CONSENT = {
     "tcpa_text": "By submitting you agree to receive emails.",
     "tcpa_date": "2026-01-15T10:30:00Z",
@@ -36,12 +41,12 @@ async def test_batch_requires_auth(client):
 
 
 @pytest.mark.asyncio
-async def test_batch_reports_per_row_status(client, auth_headers):
+async def test_batch_reports_per_row_status(client, otto_ingest_headers):
     good = f"api-good-{uuid.uuid4()}@cadencetests.io"
     noconsent = f"api-nc-{uuid.uuid4()}@cadencetests.io"
     resp = await client.post(
         "/api/ingest/records/batch",
-        headers=auth_headers,
+        headers=otto_ingest_headers,
         json={
             "tenant": "otto",
             "vertical": "auto",
@@ -69,7 +74,7 @@ async def test_batch_reports_per_row_status(client, auth_headers):
 
 
 @pytest.mark.asyncio
-async def test_batch_survives_a_bad_row_at_the_database_level(client, auth_headers, monkeypatch):
+async def test_batch_survives_a_bad_row_at_the_database_level(client, otto_ingest_headers, monkeypatch):
     """Final-review finding: the batch endpoint used to loop all rows on one
     shared session with a single commit and no per-row isolation, so one
     row that raised at the DB level (e.g. CAST(:ip AS inet) on a malformed
@@ -102,7 +107,7 @@ async def test_batch_survives_a_bad_row_at_the_database_level(client, auth_heade
 
     resp = await client.post(
         "/api/ingest/records/batch",
-        headers=auth_headers,
+        headers=otto_ingest_headers,
         json={
             "tenant": "otto",
             "vertical": "auto",
@@ -130,10 +135,10 @@ async def test_batch_survives_a_bad_row_at_the_database_level(client, auth_heade
 
 
 @pytest.mark.asyncio
-async def test_batch_size_is_capped(client, auth_headers):
+async def test_batch_size_is_capped(client, otto_ingest_headers):
     resp = await client.post(
         "/api/ingest/records/batch",
-        headers=auth_headers,
+        headers=otto_ingest_headers,
         json={
             "tenant": "otto",
             "vertical": "auto",
@@ -141,3 +146,74 @@ async def test_batch_size_is_capped(client, auth_headers):
         },
     )
     assert resp.status_code == 422
+
+
+@pytest.mark.parametrize("key", ["wrong-key", "test-api-key", ""])
+async def test_batch_rejects_non_ingestion_keys(client, key: str) -> None:
+    response = await client.post(
+        "/api/ingest/records/batch",
+        headers={"X-API-Key": key},
+        json={"tenant": "otto", "vertical": "auto", "records": []},
+    )
+    assert response.status_code == 401
+
+
+@pytest.mark.parametrize("tenant", ["other", "OTTO", "otto ", ""])
+async def test_otto_key_cannot_ingest_another_tenant(client, otto_ingest_headers, tenant: str) -> None:
+    email = f"api-scope-{uuid.uuid4()}@cadencetests.io"
+    response = await client.post(
+        "/api/ingest/records/batch",
+        headers=otto_ingest_headers,
+        json={"tenant": tenant, "vertical": "auto", "records": [_record(email)]},
+    )
+    assert response.status_code == 403
+    async with async_session_factory() as session:
+        count = await session.scalar(
+            text("SELECT count(*) FROM recipients WHERE email=:email"), {"email": email}
+        )
+    assert count == 0
+
+
+async def test_otto_key_defaults_to_otto_tenant(client, otto_ingest_headers) -> None:
+    email = f"api-default-{uuid.uuid4()}@cadencetests.io"
+    response = await client.post(
+        "/api/ingest/records/batch",
+        headers=otto_ingest_headers,
+        json={"vertical": "auto", "records": [_record(email)]},
+    )
+    assert response.status_code == 200
+    assert response.json()["results"][0]["status"] == "created"
+    async with async_session_factory() as session:
+        tenant = await session.scalar(
+            text("SELECT tenant FROM recipients WHERE email=:email"), {"email": email}
+        )
+    assert tenant == "otto"
+
+
+@pytest.mark.parametrize("key", [None, ""])
+async def test_batch_fails_closed_without_configured_otto_key(
+    client, monkeypatch, key: str | None
+) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "app.core.auth.get_settings",
+        lambda: SimpleNamespace(api_key="test-api-key", otto_ingest_api_key=key),
+    )
+    response = await client.post(
+        "/api/ingest/records/batch",
+        headers={"X-API-Key": ""},
+        json={"tenant": "otto", "vertical": "auto", "records": []},
+    )
+    assert response.status_code == 401
+
+
+async def test_otto_key_cannot_access_other_api_routes(client, otto_ingest_headers) -> None:
+    response = await client.get("/api/suppressions", headers=otto_ingest_headers)
+    assert response.status_code == 401
+    response = await client.post(
+        "/api/ingest/recipients",
+        headers=otto_ingest_headers,
+        json={"tenant": "otto", "vertical": "auto", "email": "scope@cadencetests.io"},
+    )
+    assert response.status_code == 401

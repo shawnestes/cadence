@@ -32,6 +32,7 @@ _TEST_DB_URL = os.environ.get(
 )
 os.environ["CADENCE_DATABASE_URL"] = _TEST_DB_URL
 os.environ.setdefault("CADENCE_API_KEY", "test-api-key")
+os.environ["CADENCE_OTTO_INGEST_API_KEY"] = "test-otto-ingest-key"
 # Tests must never hit the real Anthropic API: real env vars take precedence
 # over .env in pydantic-settings, so this forces the mock backend.
 os.environ["CADENCE_AI_BACKEND"] = "mock"

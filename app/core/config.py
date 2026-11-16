@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     environment: str = "dev"
     app_name: str = "cadence"
     api_key: str
+    otto_ingest_api_key: str | None = None
     otto_unsub_endpoint: str | None = None
     otto_api_key: str | None = None
 

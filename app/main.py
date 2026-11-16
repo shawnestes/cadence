@@ -43,11 +43,7 @@ app.include_router(metrics.router)
 app.include_router(webhooks.router)
 app.include_router(unsub.router)
 app.include_router(origin_platform.router, prefix="/ingest")
-app.include_router(
-    ingest.router,
-    prefix="/api",
-    dependencies=[Depends(require_api_key)],
-)
+app.include_router(ingest.router, prefix="/api")
 app.include_router(
     suppressions.router,
     prefix="/api",

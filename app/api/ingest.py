@@ -7,6 +7,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api._enrollment import EnrollmentOutcome, enroll_recipient
+from app.core.auth import require_api_key, require_otto_ingest_key
 from app.core.db import get_db
 from app.domain.segment import matches as segment_matches
 from app.models.recipient import Recipient
@@ -26,7 +27,11 @@ router = APIRouter(tags=["ingest"])
 log = structlog.get_logger(__name__)
 
 
-@router.post("/ingest/recipients", response_model=RecipientIngestOut)
+@router.post(
+    "/ingest/recipients",
+    response_model=RecipientIngestOut,
+    dependencies=[Depends(require_api_key)],
+)
 async def ingest_recipient(
     payload: RecipientIngestIn,
     response: Response,
@@ -135,7 +140,11 @@ async def ingest_recipient(
     )
 
 
-@router.post("/ingest/records/batch", response_model=RecordBatchOut)
+@router.post(
+    "/ingest/records/batch",
+    response_model=RecordBatchOut,
+    dependencies=[Depends(require_otto_ingest_key)],
+)
 async def ingest_records_batch(
     payload: RecordBatchIn,
     db: AsyncSession = Depends(get_db),

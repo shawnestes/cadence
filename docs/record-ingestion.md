@@ -224,9 +224,14 @@ included) and the batch endpoint:
 
 ```
 POST /api/ingest/records/batch
-X-API-Key: <key>
+X-API-Key: <CADENCE_OTTO_INGEST_API_KEY supplied securely>
 Content-Type: application/json
 ```
+
+This endpoint accepts only the private `CADENCE_OTTO_INGEST_API_KEY` and tenant
+`otto`. The general `CADENCE_API_KEY` is not accepted here. The OTTO key grants
+no access to other API routes; never put it in frontend configuration or Slack.
+An unset/empty ingestion key disables authenticated access to this endpoint.
 
 Same pipeline, same rules. **Max 200 records per request** — three DB writes per
 record, and 200 keeps the request inside gateway timeouts. 201+ records is a 422.
@@ -264,7 +269,7 @@ Each object in `records` uses the **same field names as the CSV columns** —
 flat `year`/`make`/`model` keys work too, but a real `vehicles` array is
 cleaner over JSON.
 
-- `tenant` defaults to `"otto"`.
+- `tenant` defaults to `"otto"`; any other value returns **403**.
 - `vertical` is required: `"auto"` or `"home"`.
 - `enroll` must be `false` or omitted. `true` returns **400** — enrollment over
   HTTP is not implemented yet; use the CLI's `--enroll`.
@@ -302,17 +307,18 @@ In `counters`, `"error"` records are folded into `rejected`.
 | 200 | Request processed — read `results` for per-record outcomes |
 | 400 | `enroll: true` |
 | 401 | Missing or wrong `X-API-Key` |
+| 403 | OTTO ingestion key used with a tenant other than `otto` |
 | 422 | Malformed body, unknown `vertical`, or more than 200 records |
-| 500 | The final commit failed — **nothing in the batch was written**, retry it |
+| 500 | Processing failed; reconcile persisted records before replaying the batch |
 
-A 500 is the one case where per-record statuses are moot: all records share a
-single final commit, so if that commit fails, none of them landed.
+A failed final commit rolls back the batch, but failures after commit can also
+return 500. For 500 responses or timeouts, do not assume nothing was saved.
 
 ### curl
 
 ```bash
 curl -sS -X POST https://<host>/api/ingest/records/batch \
-  -H "X-API-Key: $CADENCE_API_KEY" \
+  -H "X-API-Key: $CADENCE_OTTO_INGEST_API_KEY" \
   -H 'Content-Type: application/json' \
   --data @batch.json
 ```
