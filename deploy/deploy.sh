@@ -12,6 +12,8 @@ echo "[1/5] git pull origin $BRANCH"
 git fetch --prune origin
 git checkout "$BRANCH"
 git pull --ff-only origin "$BRANCH"
+# Cron executes this launcher directly, including after a non-executable checkout.
+chmod 755 deploy/daily_send_cron.sh
 
 echo "[2/5] uv sync (Python deps)"
 uv sync --frozen
