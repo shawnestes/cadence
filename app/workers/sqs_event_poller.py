@@ -275,7 +275,7 @@ async def _process_message(
                   AND provider_msg_id = :msg_id
                   AND event_type = :click_code
                   AND tenant = :tenant
-                  AND date_trunc('second', occurred_at) = date_trunc('second', :occurred_at::timestamptz)
+                  AND date_trunc('second', occurred_at) = date_trunc('second', CAST(:occurred_at AS timestamptz))
                 """
             ),
             {
