@@ -73,12 +73,13 @@ async def test_click_event_is_recorded(db_session) -> None:
     with patch("app.workers.sqs_event_poller._verify_envelope", return_value=True):
         await _process_message(db_session, _click_message(email, msg_id, now))
 
-    clicks = (await db_session.execute(
-        text("SELECT count(*) FROM contact_event WHERE provider_msg_id = :m AND event_type = :c"),
+    # click_id is the join key origin_platform and profile_refresh use to reclassify.
+    click_ids = (await db_session.execute(
+        text("SELECT click_id FROM contact_event WHERE provider_msg_id = :m AND event_type = :c"),
         {"m": msg_id, "c": _CLICK},
-    )).scalar_one()
+    )).scalars().all()
     registry = (await db_session.execute(
         text("SELECT count(*) FROM click_registry WHERE click_id = 'ck-123' AND tenant = :t"),
         {"t": _TENANT},
     )).scalar_one()
-    assert (clicks, registry) == (1, 1)
+    assert (click_ids, registry) == (["ck-123"], 1)

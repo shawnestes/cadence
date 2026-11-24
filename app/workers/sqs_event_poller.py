@@ -105,6 +105,7 @@ async def _insert_contact_event(
     provider_msg_id: str,
     meta: dict[str, Any] | None,
     classification: int | None = None,
+    click_id: str | None = None,
 ) -> None:
     """Insert a contact_event row with ON CONFLICT DO NOTHING."""
     await db.execute(
@@ -112,10 +113,10 @@ async def _insert_contact_event(
             """
             INSERT INTO contact_event
                 (event_id, occurred_at, tenant, contact_id, channel, event_type,
-                 source, provider_msg_id, classification, meta)
+                 source, provider_msg_id, classification, meta, click_id)
             VALUES
                 (:event_id, :occurred_at, :tenant, :contact_id, :channel,
-                 :event_type, :source, :provider_msg_id, :classification, :meta)
+                 :event_type, :source, :provider_msg_id, :classification, :meta, :click_id)
             ON CONFLICT DO NOTHING
             """
         ),
@@ -130,6 +131,7 @@ async def _insert_contact_event(
             "provider_msg_id": provider_msg_id,
             "classification": classification,
             "meta": json.dumps(meta) if meta else None,
+            "click_id": click_id,
         },
     )
 
@@ -325,6 +327,7 @@ async def _process_message(
         provider_msg_id=msg_id,
         meta=meta,
         classification=classification,
+        click_id=click_id,
     )
 
     # 7b. For Click events with a click_id, upsert click_registry.
