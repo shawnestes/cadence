@@ -185,7 +185,10 @@ async def _process_message(
     event_type_str: str = ses_payload.get("eventType", "")
     mail: dict[str, Any] = ses_payload.get("mail", {})
     msg_id: str = mail.get("messageId", "")
-    timestamp_str: str = mail.get("timestamp", "")
+    # mail.timestamp is when the message was sent; the event object (click,
+    # open, delivery, bounce, ...) carries when this event happened.
+    detail: dict[str, Any] = ses_payload.get(event_type_str[:1].lower() + event_type_str[1:]) or {}
+    timestamp_str: str = detail.get("timestamp") or mail.get("timestamp", "")
     destinations: list[str] = mail.get("destination", [])
 
     try:
